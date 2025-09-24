@@ -133,6 +133,7 @@ func (c *ChatClient) Start() {
 	fmt.Println("  #fav clear - очистить список")
 	fmt.Println("  #all сообщение - массовое личное сообщение")
 	fmt.Println("  @ник сообщение - приватное сообщение")
+	fmt.Println("  #mailbox - проверить почтовый ящик")
 	fmt.Println("  #block ник - добавить в чёрный список")
 	fmt.Println("  #unblock ник - убрать из чёрного списка")
 	fmt.Println("  /quit - выход из чата")
@@ -199,6 +200,11 @@ func (c *ChatClient) readMessages() {
 		// Обработка спец сообщений
 		if strings.HasPrefix(message, "USERS:") {
 			c.handleUserList(message)
+			continue
+		}
+
+		if strings.HasPrefix(message, "[📮]") {
+			c.printFormattedMessage(message)
 			continue
 		}
 

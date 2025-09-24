@@ -21,6 +21,17 @@ type Client struct {
 	favoriteUsers map[string]bool
 }
 
+type MailboxMessage struct {
+	From    string
+	Message string
+	Time    time.Time
+}
+
+type Mailbox struct {
+	Messages []MailboxMessage
+	Mutex    sync.RWMutex
+}
+
 type ChatServer struct {
 	host         string
 	port         int
@@ -28,18 +39,20 @@ type ChatServer struct {
 	clients      []*Client
 	mutex        sync.Mutex
 	running      bool
-	userHistory  map[string]string // IP -> последний никнейм
+	userHistory  map[string]string
 	historyMutex sync.RWMutex
+	mailboxes    map[string]*Mailbox // никнейм -> почтовый ящик
+	mailboxMutex sync.RWMutex
 }
 
 func NewChatServer(host string, port int) *ChatServer {
 	return &ChatServer{
-		host:         host,
-		port:         port,
-		clients:      make([]*Client, 0),
-		running:      false,
-		userHistory:  make(map[string]string), // инициализация истории
-		historyMutex: sync.RWMutex{},
+		host:        host,
+		port:        port,
+		clients:     make([]*Client, 0),
+		running:     false,
+		userHistory: make(map[string]string),
+		mailboxes:   make(map[string]*Mailbox),
 	}
 }
 
@@ -78,6 +91,75 @@ func (s *ChatServer) Start() error {
 	}
 
 	return nil
+}
+
+func (s *ChatServer) getOrCreateMailbox(nickname string) *Mailbox {
+	s.mailboxMutex.Lock()
+	defer s.mailboxMutex.Unlock()
+
+	if mailbox, exists := s.mailboxes[nickname]; exists {
+		return mailbox
+	}
+
+	mailbox := &Mailbox{
+		Messages: make([]MailboxMessage, 0),
+	}
+	s.mailboxes[nickname] = mailbox
+	return mailbox
+}
+
+func (s *ChatServer) addOfflineMessage(to, from, message string) bool {
+	mailbox := s.getOrCreateMailbox(to)
+	mailbox.Mutex.Lock()
+	defer mailbox.Mutex.Unlock()
+
+	// Проверяем лимит сообщений (максимум 10)
+	if len(mailbox.Messages) >= 10 {
+		return false // Ящик переполнен
+	}
+
+	mailbox.Messages = append(mailbox.Messages, MailboxMessage{
+		From:    from,
+		Message: message,
+		Time:    time.Now(),
+	})
+	return true
+}
+
+func (s *ChatServer) deliverOfflineMessages(client *Client) {
+	mailbox := s.getOrCreateMailbox(client.nickname)
+	mailbox.Mutex.Lock()
+	defer mailbox.Mutex.Unlock()
+
+	if len(mailbox.Messages) == 0 {
+		return
+	}
+
+	// Доставляем все сообщения
+	for _, msg := range mailbox.Messages {
+		timestamp := msg.Time.Format("15:04:05")
+		offlineMsg := fmt.Sprintf("[📮][%s] %s (оффлайн): %s", timestamp, msg.From, msg.Message)
+		s.sendToClient(client, offlineMsg)
+	}
+
+	// Очищаем ящик после доставки
+	mailbox.Messages = make([]MailboxMessage, 0)
+
+	// Уведомляем пользователя
+	s.sendToClient(client, fmt.Sprintf("📬 Вам доставлено %d отложенных сообщений", len(mailbox.Messages)))
+}
+
+func (s *ChatServer) getMailboxStatus(client *Client) {
+	mailbox := s.getOrCreateMailbox(client.nickname)
+	mailbox.Mutex.RLock()
+	defer mailbox.Mutex.RUnlock()
+
+	count := len(mailbox.Messages)
+	if count == 0 {
+		s.sendToClient(client, "📭 Ваш почтовый ящик пуст")
+	} else {
+		s.sendToClient(client, fmt.Sprintf("📬 У вас %d отложенных сообщений", count))
+	}
 }
 
 func (s *ChatServer) getPreviousNickname(ip string) string {
@@ -183,7 +265,7 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 
 	// Добавляем клиента в список
 	s.addClient(client)
-
+	s.deliverOfflineMessages(client)
 	// Отправляем подтверждение
 	writer.WriteString("NICK_OK\n")
 	writer.Flush()
@@ -225,27 +307,62 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 				privateMsg := parts[1]
 
 				if targetNick != "" && privateMsg != "" {
-					timestamp := time.Now().Format("15:04:05")
-					privateMessage := fmt.Sprintf("[ЛС][%s] %s: %s", timestamp, nickname, privateMsg)
-					confirmation := fmt.Sprintf("[ЛС][%s] Вы → %s: %s", timestamp, targetNick, privateMsg)
+					// Проверяем, онлайн ли целевой пользователь
+					targetClient := s.findClientByNickname(targetNick)
 
-					success := s.sendPrivateMessage(targetNick, privateMessage, client)
-					if success {
-						// Отправляем подтверждение отправителю
-						s.sendToClient(client, confirmation)
-						fmt.Printf("💌 ЛС от %s к %s: %s\n", nickname, targetNick, privateMsg)
-					} else {
-						// Проверяем, заблокирован ли отправитель
-						targetClient := s.findClientByNickname(targetNick)
-						if targetClient != nil && targetClient.blocked[nickname] {
+					if targetClient != nil && targetClient != client {
+						// Пользователь онлайн - отправляем сразу
+						// Проверяем блокировку
+						if targetClient.blocked[client.nickname] {
 							s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s заблокировал вас", targetNick))
+							continue
+						}
+
+						timestamp := time.Now().Format("15:04:05")
+						privateMessage := fmt.Sprintf("[ЛС][%s] %s: %s", timestamp, client.nickname, privateMsg)
+						confirmation := fmt.Sprintf("[ЛС][%s] Вы → %s: %s", timestamp, targetNick, privateMsg)
+
+						s.sendToClient(targetClient, privateMessage)
+						s.sendToClient(client, confirmation)
+						fmt.Printf("💌 ЛС от %s к %s: %s\n", client.nickname, targetNick, privateMsg)
+					} else {
+						// Пользователь оффлайн - сохраняем как отложенное сообщение
+						if targetNick == client.nickname {
+							s.sendToClient(client, "❌ Нельзя отправить сообщение самому себе")
+							continue
+						}
+
+						// Проверяем существует ли пользователь в истории
+						targetExists := s.isNicknameTaken(targetNick) || s.userExistsInHistory(targetNick)
+
+						if !targetExists {
+							s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s не найден", targetNick))
+							continue
+						}
+
+						// Добавляем отложенное сообщение
+						success := s.addOfflineMessage(targetNick, client.nickname, privateMsg)
+
+						if success {
+							timestamp := time.Now().Format("15:04:05")
+							s.sendToClient(client, fmt.Sprintf("📮 [%s] Сообщение для %s сохранено (пользователь оффлайн)", timestamp, targetNick))
+							fmt.Printf("📮 %s оставил сообщение для %s (оффлайн): %s\n", client.nickname, targetNick, privateMsg)
 						} else {
-							s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s не найден или offline", targetNick))
+							s.sendToClient(client, fmt.Sprintf("❌ Почтовый ящик %s переполнен (максимум 10 сообщений)", targetNick))
 						}
 					}
 					continue
 				}
+			} else {
+				s.sendToClient(client, "❌ Использование: @никнейм сообщение")
+				continue
 			}
+		}
+
+		// Обработка команды #mailbox
+		if message == "#mailbox" {
+			s.getMailboxStatus(client)
+			continue
 		}
 
 		if strings.HasPrefix(message, "#") {
@@ -385,6 +502,7 @@ func (s *ChatServer) sendHelp(client *Client) {
 		"#all сообщение - массовое личное сообщение | " +
 		"#users - список пользователей | " +
 		"#help - эта справка | " +
+		"#mailbox - проверить почтовый ящик | " +
 		"#fav [ник] - добавить/удалить любимого писателя | " +
 		"#fav list - показать список | " +
 		"#fav clear - очистить список | " +
@@ -478,6 +596,18 @@ func (s *ChatServer) disconnectClient(client *Client) {
 		s.broadcastMessage(leaveMessage, nil)
 		fmt.Printf("👋 %s отключился\n", client.nickname)
 	}
+}
+
+func (s *ChatServer) userExistsInHistory(nickname string) bool {
+	s.historyMutex.RLock()
+	defer s.historyMutex.RUnlock()
+
+	for _, storedNickname := range s.userHistory {
+		if storedNickname == nickname {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ChatServer) Shutdown() {
