@@ -87,14 +87,9 @@ func (c *ChatClient) Start() {
 	go c.readMessages()
 
 	fmt.Println("\n💬 Добро пожаловать в чат!")
-	fmt.Println("Доступные команды:")
-	fmt.Println("  #help - показать справку")
-	fmt.Println("  #users - список пользователей")
-	fmt.Println("  #all сообщение - массовое личное сообщение")
-	fmt.Println("  @ник сообщение - приватное сообщение")
-	fmt.Println("  #block ник - добавить в чёрный список")
-	fmt.Println("  #unblock ник - убрать из чёрного списка")
-	fmt.Println("  /quit - выход из чата")
+	fmt.Println("Для получения справки введите #help")
+	fmt.Println("/quit - выход из чата")
+	fmt.Println(strings.Repeat("=", 50))
 	fmt.Println(strings.Repeat("=", 50))
 
 	for c.running {
@@ -149,6 +144,12 @@ func (c *ChatClient) readMessages() {
 			continue
 		}
 
+		// Добавь этот блок для обработки справки
+		if strings.HasPrefix(message, "HELP:") {
+			c.handleHelp(message)
+			continue
+		}
+
 		// Проверка на блокировку
 		for blockedUser := range c.blocked {
 			if strings.Contains(message, blockedUser) {
@@ -184,6 +185,31 @@ func (c *ChatClient) handleUserList(message string) {
 			fmt.Printf("%s %s\n", status, user)
 		}
 	}
+	fmt.Print("> ")
+}
+
+func (c *ChatClient) handleHelp(message string) {
+	helpText := strings.TrimPrefix(message, "HELP:")
+
+	// Разбиваем текст по разделителю " | " для красивого отображения
+	commands := strings.Split(helpText, " | ")
+
+	fmt.Printf("\n\033[1;34m%s\033[0m\n", "📖 Справка по командам чата:")
+	fmt.Println(strings.Repeat("─", 60))
+	fmt.Println("📖 Справка по командам:")
+
+	for _, cmd := range commands {
+
+		// Разделяем команду и описание
+		if strings.Contains(cmd, " - ") {
+			parts := strings.SplitN(cmd, " - ", 2)
+			fmt.Printf("\033[1;32m%-25s\033[0m %s\n", parts[0], parts[1])
+		} else {
+			fmt.Printf("  %s\n", cmd)
+		}
+	}
+
+	fmt.Println(strings.Repeat("─", 60))
 	fmt.Print("> ")
 }
 

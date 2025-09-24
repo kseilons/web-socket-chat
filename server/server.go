@@ -160,7 +160,7 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 
 				if targetNick != "" && privateMsg != "" {
 					timestamp := time.Now().Format("15:04:05")
-					privateMessage := fmt.Sprintf("[ЛС][%s] %s → %s: %s", timestamp, nickname, targetNick, privateMsg)
+					privateMessage := fmt.Sprintf("[ЛС][%s] %s: %s", timestamp, nickname, privateMsg)
 					confirmation := fmt.Sprintf("[ЛС][%s] Вы → %s: %s", timestamp, targetNick, privateMsg)
 
 					if s.sendPrivateMessage(targetNick, privateMessage, client) {
@@ -258,14 +258,14 @@ func (s *ChatServer) sendToClient(client *Client, message string) {
 }
 
 func (s *ChatServer) sendHelp(client *Client) {
-	helpMessage := `📖 Справка по командам:
-	Обычное сообщение - отправляется всем
-	@ник сообщение - личное сообщение
-	#all сообщение - массовое личное сообщение
-	#users - список пользователей
-	#help - эта справка
-	#block ник - добавить в чёрный список
-	#unblock ник - убрать из чёрного списка`
+	helpMessage := "HELP:" +
+		"@ник сообщение - личное сообщение | " +
+		"#all сообщение - массовое личное сообщение | " +
+		"#users - список пользователей | " +
+		"#help - эта справка | " +
+		"#block ник - добавить в чёрный список | " +
+		"#unblock ник - убрать из чёрного списка | " +
+		"/quit - выход из чата"
 	s.sendToClient(client, helpMessage)
 }
 func (s *ChatServer) isNicknameTaken(nickname string) bool {
