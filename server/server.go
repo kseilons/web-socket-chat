@@ -266,9 +266,9 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 				}
 				msg := parts[1]
 				timestamp := time.Now().Format("15:04:05")
-				privateMessage := fmt.Sprintf("[МЛС][%s] %s → все: %s", timestamp, nickname, msg)
+				privateMessage := fmt.Sprintf("[МЛС][%s] %s: %s", timestamp, nickname, msg)
 				s.broadcastPrivateMessage(privateMessage, client)
-				s.sendToClient(client, fmt.Sprintf("[МЛС][%s] Вы → все: %s", timestamp, msg))
+				s.sendToClient(client, fmt.Sprintf("[МЛС][%s] Вы: %s", timestamp, msg))
 				continue
 			case "block":
 				if len(parts) < 2 {
@@ -290,15 +290,15 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 				continue
 			case "fav":
 				if len(parts) < 2 {
-					// Показываем текущий список любимых
+					// Отправляем список в сыром виде
 					if len(client.favoriteUsers) == 0 {
-						s.sendToClient(client, "📝 Ваш список любимых писателей пуст")
+						s.sendToClient(client, "FAV_LIST:")
 					} else {
 						var favList []string
 						for user := range client.favoriteUsers {
 							favList = append(favList, user)
 						}
-						s.sendToClient(client, fmt.Sprintf("❤️ Ваши любимые писатели: %s", strings.Join(favList, ", ")))
+						s.sendToClient(client, "FAV_LIST:"+strings.Join(favList, ","))
 					}
 					continue
 				}
@@ -307,31 +307,29 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 
 				if strings.ToLower(target) == "clear" || target == "" {
 					client.favoriteUsers = make(map[string]bool)
-					s.sendToClient(client, "✅ Список любимых писателей очищен")
+					s.sendToClient(client, "FAV_CLEARED")
 				} else if strings.ToLower(target) == "list" {
 					if len(client.favoriteUsers) == 0 {
-						s.sendToClient(client, "📝 Ваш список любимых писателей пуст")
+						s.sendToClient(client, "FAV_LIST:")
 					} else {
 						var favList []string
 						for user := range client.favoriteUsers {
 							favList = append(favList, user)
 						}
-						s.sendToClient(client, fmt.Sprintf("❤️ Ваши любимые писатели (%d): %s", len(favList), strings.Join(favList, ", ")))
+						s.sendToClient(client, "FAV_LIST:"+strings.Join(favList, ","))
 					}
 				} else if target == client.nickname {
-					s.sendToClient(client, "❌ Нельзя добавить себя в любимые писатели")
+					s.sendToClient(client, "FAV_ERROR:Нельзя добавить себя в любимые писатели")
 				} else if s.isNicknameTaken(target) {
 					if client.favoriteUsers[target] {
-						// Удаляем из списка если уже есть
 						delete(client.favoriteUsers, target)
-						s.sendToClient(client, fmt.Sprintf("✅ %s удален из списка любимых писателей", target))
+						s.sendToClient(client, "FAV_REMOVED:"+target)
 					} else {
-						// Добавляем в список
 						client.favoriteUsers[target] = true
-						s.sendToClient(client, fmt.Sprintf("❤️ %s добавлен в список любимых писателей", target))
+						s.sendToClient(client, "FAV_ADDED:"+target)
 					}
 				} else {
-					s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s не найден", target))
+					s.sendToClient(client, "FAV_ERROR:Пользователь "+target+" не найден")
 				}
 				continue
 
