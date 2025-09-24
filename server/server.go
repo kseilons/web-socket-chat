@@ -13,11 +13,12 @@ import (
 )
 
 type Client struct {
-	conn     net.Conn
-	nickname string
-	address  string
-	writer   *bufio.Writer
-	blocked  map[string]bool
+	conn          net.Conn
+	nickname      string
+	address       string
+	writer        *bufio.Writer
+	blocked       map[string]bool
+	favoriteUsers map[string]bool
 }
 
 type ChatServer struct {
@@ -172,11 +173,12 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 
 	// Создаем клиента с инициализированной картой blocked
 	client = &Client{
-		conn:     conn,
-		nickname: nickname,
-		address:  address,
-		writer:   writer,
-		blocked:  make(map[string]bool),
+		conn:          conn,
+		nickname:      nickname,
+		address:       address,
+		writer:        writer,
+		blocked:       make(map[string]bool),
+		favoriteUsers: make(map[string]bool),
 	}
 
 	// Добавляем клиента в список
@@ -286,6 +288,53 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 				delete(client.blocked, target)
 				s.sendToClient(client, fmt.Sprintf("✅ %s убран из чёрного списка", target))
 				continue
+			case "fav":
+				if len(parts) < 2 {
+					// Показываем текущий список любимых
+					if len(client.favoriteUsers) == 0 {
+						s.sendToClient(client, "📝 Ваш список любимых писателей пуст")
+					} else {
+						var favList []string
+						for user := range client.favoriteUsers {
+							favList = append(favList, user)
+						}
+						s.sendToClient(client, fmt.Sprintf("❤️ Ваши любимые писатели: %s", strings.Join(favList, ", ")))
+					}
+					continue
+				}
+
+				target := parts[1]
+
+				if strings.ToLower(target) == "clear" || target == "" {
+					client.favoriteUsers = make(map[string]bool)
+					s.sendToClient(client, "✅ Список любимых писателей очищен")
+				} else if strings.ToLower(target) == "list" {
+					if len(client.favoriteUsers) == 0 {
+						s.sendToClient(client, "📝 Ваш список любимых писателей пуст")
+					} else {
+						var favList []string
+						for user := range client.favoriteUsers {
+							favList = append(favList, user)
+						}
+						s.sendToClient(client, fmt.Sprintf("❤️ Ваши любимые писатели (%d): %s", len(favList), strings.Join(favList, ", ")))
+					}
+				} else if target == client.nickname {
+					s.sendToClient(client, "❌ Нельзя добавить себя в любимые писатели")
+				} else if s.isNicknameTaken(target) {
+					if client.favoriteUsers[target] {
+						// Удаляем из списка если уже есть
+						delete(client.favoriteUsers, target)
+						s.sendToClient(client, fmt.Sprintf("✅ %s удален из списка любимых писателей", target))
+					} else {
+						// Добавляем в список
+						client.favoriteUsers[target] = true
+						s.sendToClient(client, fmt.Sprintf("❤️ %s добавлен в список любимых писателей", target))
+					}
+				} else {
+					s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s не найден", target))
+				}
+				continue
+
 			}
 		}
 
@@ -338,6 +387,9 @@ func (s *ChatServer) sendHelp(client *Client) {
 		"#all сообщение - массовое личное сообщение | " +
 		"#users - список пользователей | " +
 		"#help - эта справка | " +
+		"#fav [ник] - добавить/удалить любимого писателя | " +
+		"#fav list - показать список | " +
+		"#fav clear - очистить список | " +
 		"#block ник - добавить в чёрный список | " +
 		"#unblock ник - убрать из чёрного списка | " +
 		"/quit - выход из чата"

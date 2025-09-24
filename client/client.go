@@ -21,6 +21,7 @@ type ChatClient struct {
 	favoriteUser  string
 	consoleReader *bufio.Reader
 	blocked       map[string]bool // локальный чёрный список
+	favoriteUsers map[string]bool
 }
 
 func NewChatClient(server string, port int) *ChatClient {
@@ -30,6 +31,7 @@ func NewChatClient(server string, port int) *ChatClient {
 		running:       true,
 		consoleReader: bufio.NewReader(os.Stdin),
 		blocked:       make(map[string]bool),
+		favoriteUsers: make(map[string]bool),
 	}
 }
 
@@ -123,9 +125,17 @@ func (c *ChatClient) Start() {
 	go c.readMessages()
 
 	fmt.Println("\n💬 Добро пожаловать в чат!")
-	fmt.Println("Для получения справки введите #help")
-	fmt.Println("/quit - выход из чата")
-	fmt.Println(strings.Repeat("=", 50))
+	fmt.Println("Доступные команды:")
+	fmt.Println("  #help - показать справку")
+	fmt.Println("  #users - список пользователей")
+	fmt.Println("  #fav [ник] - добавить/удалить любимого писателя")
+	fmt.Println("  #fav list - показать список любимых")
+	fmt.Println("  #fav clear - очистить список")
+	fmt.Println("  #all сообщение - массовое личное сообщение")
+	fmt.Println("  @ник сообщение - приватное сообщение")
+	fmt.Println("  #block ник - добавить в чёрный список")
+	fmt.Println("  #unblock ник - убрать из чёрного списка")
+	fmt.Println("  /quit - выход из чата")
 	fmt.Println(strings.Repeat("=", 50))
 
 	for c.running {
@@ -142,6 +152,65 @@ func (c *ChatClient) Start() {
 			fmt.Println("👋 Выход из чата...")
 			c.running = false
 			break
+		}
+
+		// Обработка команды #fav на клиенте
+		if strings.HasPrefix(message, "#fav") {
+			parts := strings.SplitN(message, " ", 3)
+			command := ""
+			if len(parts) >= 2 {
+				command = strings.TrimSpace(parts[1])
+			}
+
+			switch strings.ToLower(command) {
+			case "": // просто #fav
+				if len(c.favoriteUsers) == 0 {
+					fmt.Println("📝 Ваш список любимых писателей пуст")
+				} else {
+					var favList []string
+					for user := range c.favoriteUsers {
+						favList = append(favList, user)
+					}
+					fmt.Printf("❤️ Ваши любимые писатели (%d): %s\n", len(favList), strings.Join(favList, ", "))
+				}
+			case "list":
+				if len(c.favoriteUsers) == 0 {
+					fmt.Println("📝 Ваш список любимых писателей пуст")
+				} else {
+					var favList []string
+					for user := range c.favoriteUsers {
+						favList = append(favList, user)
+					}
+					fmt.Printf("❤️ Ваши любимые писатели (%d): %s\n", len(favList), strings.Join(favList, ", "))
+				}
+			case "clear":
+				c.favoriteUsers = make(map[string]bool)
+				fmt.Println("✅ Список любимых писателей очищен")
+			default:
+				target := command
+				if target == c.nickname {
+					fmt.Println("❌ Нельзя добавить себя в любимые писатели")
+				} else {
+					if c.favoriteUsers[target] {
+						// Удаляем из списка
+						delete(c.favoriteUsers, target)
+						fmt.Printf("✅ %s удален из списка любимых писателей\n", target)
+					} else {
+						// Добавляем в список
+						c.favoriteUsers[target] = true
+						fmt.Printf("❤️ %s добавлен в список любимых писателей\n", target)
+					}
+				}
+			}
+
+			// Отправляем команду на сервер для синхронизации
+			_, err = c.writer.WriteString(message + "\n")
+			if err != nil {
+				fmt.Printf("❌ Ошибка отправки команды: %v\n", err)
+			} else {
+				c.writer.Flush()
+			}
+			continue
 		}
 
 		if message == "" {
@@ -180,28 +249,56 @@ func (c *ChatClient) readMessages() {
 			continue
 		}
 
-		// Добавь этот блок для обработки справки
 		if strings.HasPrefix(message, "HELP:") {
 			c.handleHelp(message)
 			continue
 		}
 
 		// Проверка на блокировку
-		for blockedUser := range c.blocked {
-			if strings.Contains(message, blockedUser) {
-				// пропускаем вывод
-				continue
-			}
+		if c.isMessageBlocked(message) {
+			continue
 		}
 
-		// Подсветка типов сообщений
-		if strings.HasPrefix(message, "[ЛС]") {
-			fmt.Printf("\n\033[36m%s\033[0m\n> ", message) // голубой
-		} else if strings.HasPrefix(message, "[МЛС]") {
-			fmt.Printf("\n\033[35m%s\033[0m\n> ", message) // фиолетовый
-		} else {
-			fmt.Printf("\n%s\n> ", message) // обычное сообщение
+		// Подсветка сообщений
+		c.printFormattedMessage(message)
+	}
+}
+
+func (c *ChatClient) isMessageBlocked(message string) bool {
+	for blockedUser := range c.blocked {
+		if strings.Contains(message, blockedUser) {
+			return true
 		}
+	}
+	return false
+}
+
+func (c *ChatClient) printFormattedMessage(message string) {
+	// Проверяем, является ли отправитель любимым писателем
+	isFavorite := false
+	var messageSender string
+
+	// Пытаемся извлечь отправителя из сообщения (формат: "никнейм: сообщение")
+	if strings.Contains(message, ":") && !strings.HasPrefix(message, "[") {
+		parts := strings.SplitN(message, ":", 2)
+		if len(parts) >= 2 {
+			messageSender = strings.TrimSpace(parts[0])
+			isFavorite = c.favoriteUsers[messageSender]
+		}
+	}
+
+	// Определяем тип сообщения и цвет
+	switch {
+	case strings.HasPrefix(message, "[ЛС]"):
+		fmt.Printf("\n\033[36m%s\033[0m\n> ", message) // голубой
+	case strings.HasPrefix(message, "[МЛС]"):
+		fmt.Printf("\n\033[35m%s\033[0m\n> ", message) // фиолетовый
+	case isFavorite:
+		// Сообщение от любимого писателя - специальное оформление
+		fmt.Printf("\n\033[1;33m✨ %s\033[0m\n> ", message) // золотой с эмодзи
+	default:
+		// Обычное сообщение
+		fmt.Printf("\n%s\n> ", message)
 	}
 }
 
@@ -215,12 +312,23 @@ func (c *ChatClient) handleUserList(message string) {
 			status := "🟢"
 			if user == c.nickname {
 				status = "🟡 (вы)"
-			} else if user == c.favoriteUser && c.favoriteUser != "" {
-				status = "❤️"
+			} else if c.favoriteUsers[user] {
+				status = "❤️ " // любимый писатель
 			}
 			fmt.Printf("%s %s\n", status, user)
 		}
 	}
+
+	// Показываем статистику по любимым писателям
+	favCount := len(c.favoriteUsers)
+	if favCount > 0 {
+		var favList []string
+		for user := range c.favoriteUsers {
+			favList = append(favList, user)
+		}
+		fmt.Printf("❤️  Ваши любимые писатели (%d): %s\n", favCount, strings.Join(favList, ", "))
+	}
+
 	fmt.Print("> ")
 }
 
