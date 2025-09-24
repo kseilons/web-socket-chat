@@ -142,11 +142,12 @@ func (s *ChatServer) deliverOfflineMessages(client *Client) {
 		s.sendToClient(client, offlineMsg)
 	}
 
+	// Уведомляем пользователя
+	s.sendToClient(client, fmt.Sprintf("📬 Вам доставлено %d отложенных сообщений", len(mailbox.Messages)))
+
 	// Очищаем ящик после доставки
 	mailbox.Messages = make([]MailboxMessage, 0)
 
-	// Уведомляем пользователя
-	s.sendToClient(client, fmt.Sprintf("📬 Вам доставлено %d отложенных сообщений", len(mailbox.Messages)))
 }
 
 func (s *ChatServer) getMailboxStatus(client *Client) {
@@ -332,14 +333,6 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 						// Пользователь оффлайн - сохраняем как отложенное сообщение
 						if targetNick == client.nickname {
 							s.sendToClient(client, "❌ Нельзя отправить сообщение самому себе")
-							continue
-						}
-
-						// Проверяем существует ли пользователь в истории
-						targetExists := s.isNicknameTaken(targetNick) || s.userExistsInHistory(targetNick)
-
-						if !targetExists {
-							s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s не найден", targetNick))
 							continue
 						}
 
