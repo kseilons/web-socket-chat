@@ -75,6 +75,18 @@ func (s *ChatServer) Start() error {
 	return nil
 }
 
+func (s *ChatServer) findClientByNickname(nickname string) *Client {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	for _, client := range s.clients {
+		if client.nickname == nickname {
+			return client
+		}
+	}
+	return nil
+}
+
 func (s *ChatServer) handleClient(conn net.Conn, address string) {
 	var nickname string
 	var client *Client
@@ -164,12 +176,19 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 					privateMessage := fmt.Sprintf("[ЛС][%s] %s: %s", timestamp, nickname, privateMsg)
 					confirmation := fmt.Sprintf("[ЛС][%s] Вы → %s: %s", timestamp, targetNick, privateMsg)
 
-					if s.sendPrivateMessage(targetNick, privateMessage, client) {
+					success := s.sendPrivateMessage(targetNick, privateMessage, client)
+					if success {
 						// Отправляем подтверждение отправителю
 						s.sendToClient(client, confirmation)
 						fmt.Printf("💌 ЛС от %s к %s: %s\n", nickname, targetNick, privateMsg)
 					} else {
-						s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s не найден или offline", targetNick))
+						// Проверяем, заблокирован ли отправитель
+						targetClient := s.findClientByNickname(targetNick)
+						if targetClient != nil && targetClient.blocked[nickname] {
+							s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s заблокировал вас", targetNick))
+						} else {
+							s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s не найден или offline", targetNick))
+						}
 					}
 					continue
 				}
@@ -232,9 +251,9 @@ func (s *ChatServer) broadcastPrivateMessage(message string, sender *Client) {
 		if client == sender {
 			continue
 		}
-		// игнорируем, если sender в чёрном списке у получателя
+		// Проверяем, не заблокирован ли отправитель получателем
 		if client.blocked[sender.nickname] {
-			continue
+			continue // Пропускаем заблокированных
 		}
 		s.sendToClient(client, message)
 	}
@@ -246,6 +265,10 @@ func (s *ChatServer) sendPrivateMessage(targetNickname, message string, sender *
 
 	for _, client := range s.clients {
 		if client.nickname == targetNickname && client != sender {
+			// Проверяем, не заблокирован ли отправитель получателем
+			if client.blocked[sender.nickname] {
+				return false // Получатель заблокировал отправителя
+			}
 			s.sendToClient(client, message)
 			return true
 		}
