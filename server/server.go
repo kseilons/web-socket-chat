@@ -119,6 +119,7 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 		nickname: nickname,
 		address:  address,
 		writer:   writer,
+		blocked:  make(map[string]bool), // ← ДОБАВЬ ЭТУ СТРОКУ
 	}
 
 	// Добавляем клиента в список
