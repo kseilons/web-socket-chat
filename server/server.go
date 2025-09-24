@@ -21,20 +21,24 @@ type Client struct {
 }
 
 type ChatServer struct {
-	host     string
-	port     int
-	listener net.Listener
-	clients  []*Client
-	mutex    sync.Mutex
-	running  bool
+	host         string
+	port         int
+	listener     net.Listener
+	clients      []*Client
+	mutex        sync.Mutex
+	running      bool
+	userHistory  map[string]string // IP -> последний никнейм
+	historyMutex sync.RWMutex
 }
 
 func NewChatServer(host string, port int) *ChatServer {
 	return &ChatServer{
-		host:    host,
-		port:    port,
-		clients: make([]*Client, 0),
-		running: false,
+		host:         host,
+		port:         port,
+		clients:      make([]*Client, 0),
+		running:      false,
+		userHistory:  make(map[string]string), // инициализация истории
+		historyMutex: sync.RWMutex{},
 	}
 }
 
@@ -75,6 +79,20 @@ func (s *ChatServer) Start() error {
 	return nil
 }
 
+func (s *ChatServer) getPreviousNickname(ip string) string {
+	s.historyMutex.RLock()
+	defer s.historyMutex.RUnlock()
+
+	return s.userHistory[ip]
+}
+
+func (s *ChatServer) saveNicknameHistory(ip, nickname string) {
+	s.historyMutex.Lock()
+	defer s.historyMutex.Unlock()
+
+	s.userHistory[ip] = nickname
+}
+
 func (s *ChatServer) findClientByNickname(nickname string) *Client {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -99,9 +117,25 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 		}
 	}()
 
-	// Читаем никнейм клиента
+	// Извлекаем IP из адреса
+	ip := strings.Split(address, ":")[0]
+
+	// Проверяем историю для этого IP
+	previousNickname := s.getPreviousNickname(ip)
+
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
+
+	// Если есть предыдущий никнейм, предлагаем его
+	if previousNickname != "" {
+		prompt := fmt.Sprintf("NICK_PROMPT:%s\n", previousNickname)
+		writer.WriteString(prompt)
+		writer.Flush()
+		fmt.Printf("📝 Предлагаем никнейм '%s' для IP %s\n", previousNickname, ip)
+	} else {
+		writer.WriteString("NICK_REQUEST\n")
+		writer.Flush()
+	}
 
 	nickRequest, err := reader.ReadString('\n')
 	if err != nil {
@@ -110,13 +144,21 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 	}
 
 	nickRequest = strings.TrimSpace(nickRequest)
-	if !strings.HasPrefix(nickRequest, "NICK:") {
-		conn.Write([]byte("ERROR: Invalid nickname format\n"))
-		return
+
+	// Обрабатываем ответ с предложенным никнеймом
+	if strings.HasPrefix(nickRequest, "NICK:") {
+		nickname = strings.TrimPrefix(nickRequest, "NICK:")
+		nickname = strings.TrimSpace(nickname)
+	} else {
+		// Если пользователь просто ввел никнейм (без префикса)
+		nickname = strings.TrimSpace(nickRequest)
 	}
 
-	nickname = strings.TrimPrefix(nickRequest, "NICK:")
-	nickname = strings.TrimSpace(nickname)
+	if nickname == "" {
+		writer.WriteString("ERROR: Nickname cannot be empty\n")
+		writer.Flush()
+		return
+	}
 
 	// Проверяем, не занят ли никнейм
 	if s.isNicknameTaken(nickname) {
@@ -125,28 +167,37 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 		return
 	}
 
-	// Создаем клиента
+	// Сохраняем в историю
+	s.saveNicknameHistory(ip, nickname)
+
+	// Создаем клиента с инициализированной картой blocked
 	client = &Client{
 		conn:     conn,
 		nickname: nickname,
 		address:  address,
 		writer:   writer,
-		blocked:  make(map[string]bool), // ← ДОБАВЬ ЭТУ СТРОКУ
+		blocked:  make(map[string]bool),
 	}
 
 	// Добавляем клиента в список
 	s.addClient(client)
 
-	// Отправляем подтверждение (без переноса строки как в Java)
+	// Отправляем подтверждение
 	writer.WriteString("NICK_OK\n")
 	writer.Flush()
 
 	// Уведомляем всех о новом пользователе
 	joinMessage := fmt.Sprintf("🟢 %s присоединился к чату", nickname)
+
+	// Добавляем информацию о повторном входе, если применимо
+	if previousNickname != "" && previousNickname == nickname {
+		joinMessage = fmt.Sprintf("🟢 %s вернулся в чат", nickname)
+	}
+
 	s.broadcastMessage(joinMessage, client)
 	fmt.Printf("✅ %s (%s) присоединился к чату\n", nickname, address)
 
-	// Отправляем список пользователей новому клиенту в формате USERS:user1,user2
+	// Отправляем список пользователей новому клиенту
 	s.sendUserList(client)
 
 	// Обработка сообщений от клиента

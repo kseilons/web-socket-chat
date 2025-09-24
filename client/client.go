@@ -49,15 +49,50 @@ func (c *ChatClient) Connect() error {
 }
 
 func (c *ChatClient) Login() error {
-	fmt.Print("Введите ваш никнейм: ")
-	nickname, err := c.consoleReader.ReadString('\n')
+	// Читаем первоначальный ответ от сервера
+	initialResponse, err := c.reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("ошибка чтения никнейма: %v", err)
+		return fmt.Errorf("ошибка получения приветствия от сервера: %v", err)
 	}
 
-	nickname = strings.TrimSpace(nickname)
-	c.nickname = nickname
+	initialResponse = strings.TrimSpace(initialResponse)
 
+	var nickname string
+
+	if strings.HasPrefix(initialResponse, "NICK_PROMPT:") {
+		// Сервер предлагает предыдущий никнейм
+		suggestedNick := strings.TrimPrefix(initialResponse, "NICK_PROMPT:")
+		suggestedNick = strings.TrimSpace(suggestedNick)
+
+		fmt.Printf("🕒 Найден ваш предыдущий никнейм: %s\n", suggestedNick)
+		fmt.Print("Нажмите Enter чтобы использовать его, или введите новый никнейм: ")
+
+		input, err := c.consoleReader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("ошибка чтения ввода: %v", err)
+		}
+
+		input = strings.TrimSpace(input)
+		if input == "" {
+			nickname = suggestedNick
+			fmt.Printf("✅ Используем предыдущий никнейм: %s\n", nickname)
+		} else {
+			nickname = input
+		}
+	} else if initialResponse == "NICK_REQUEST" {
+		// Сервер запрашивает новый никнейм
+		fmt.Print("Введите ваш никнейм: ")
+		input, err := c.consoleReader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("ошибка чтения никнейма: %v", err)
+		}
+		nickname = strings.TrimSpace(input)
+	} else {
+		return fmt.Errorf("неожиданный ответ от сервера: %s", initialResponse)
+	}
+
+	// Отправляем выбранный никнейм серверу
+	c.nickname = nickname
 	nickMsg := fmt.Sprintf("NICK:%s\n", nickname)
 	_, err = c.writer.WriteString(nickMsg)
 	if err != nil {
@@ -65,6 +100,7 @@ func (c *ChatClient) Login() error {
 	}
 	c.writer.Flush()
 
+	// Получаем подтверждение от сервера
 	response, err := c.reader.ReadString('\n')
 	if err != nil {
 		return fmt.Errorf("ошибка получения ответа от сервера: %v", err)
