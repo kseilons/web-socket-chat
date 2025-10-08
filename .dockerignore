@@ -1,0 +1,11 @@
+# Игнорируем ненужные файлы при сборке Docker образа
+client/
+*.exe
+*.md
+.git/
+.gitignore
+README*
+Dockerfile
+docker-compose.yml
+.dockerignore
+env.example

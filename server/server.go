@@ -842,34 +842,63 @@ func (s *ChatServer) handleSignals() {
 }
 
 func getServerConfig() (string, int) {
-	reader := bufio.NewReader(os.Stdin)
+	// Проверяем переменные окружения
+	host := os.Getenv("SERVER_HOST")
+	portStr := os.Getenv("SERVER_PORT")
 
-	fmt.Println("=== 💬 WebSocket чат-сервер (Go) ===")
-	fmt.Println("Введите адрес сервера (по умолчанию: 0.0.0.0)")
-	fmt.Print("Адрес сервера [0.0.0.0]: ")
+	// Если переменные окружения не заданы, используем интерактивный ввод
+	if host == "" && portStr == "" {
+		reader := bufio.NewReader(os.Stdin)
 
-	hostInput, _ := reader.ReadString('\n')
-	hostInput = strings.TrimSpace(hostInput)
+		fmt.Println("=== 💬 WebSocket чат-сервер (Go) ===")
+		fmt.Println("Введите адрес сервера (по умолчанию: 0.0.0.0)")
+		fmt.Print("Адрес сервера [0.0.0.0]: ")
 
-	if hostInput == "" {
-		hostInput = "0.0.0.0"
+		hostInput, _ := reader.ReadString('\n')
+		hostInput = strings.TrimSpace(hostInput)
+
+		if hostInput == "" {
+			hostInput = "0.0.0.0"
+		}
+
+		fmt.Print("Введите порт сервера (по умолчанию: 12345): ")
+		portInput, _ := reader.ReadString('\n')
+		portInput = strings.TrimSpace(portInput)
+
+		var port int
+		if portInput == "" {
+			port = 12345
+		} else {
+			if _, err := fmt.Sscanf(portInput, "%d", &port); err != nil || port <= 0 || port >= 65536 {
+				fmt.Printf("❌ Неверный порт, используем порт по умолчанию: 12345\n")
+				port = 12345
+			}
+		}
+
+		return hostInput, port
 	}
 
-	fmt.Print("Введите порт сервера (по умолчанию: 12345): ")
-	portInput, _ := reader.ReadString('\n')
-	portInput = strings.TrimSpace(portInput)
+	// Используем переменные окружения
+	if host == "" {
+		host = "0.0.0.0"
+	}
 
 	var port int
-	if portInput == "" {
+	if portStr == "" {
 		port = 12345
 	} else {
-		if _, err := fmt.Sscanf(portInput, "%d", &port); err != nil || port <= 0 || port >= 65536 {
-			fmt.Printf("❌ Неверный порт, используем порт по умолчанию: 12345\n")
+		if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil || port <= 0 || port >= 65536 {
+			fmt.Printf("❌ Неверный порт в переменной окружения SERVER_PORT, используем порт по умолчанию: 12345\n")
 			port = 12345
 		}
 	}
 
-	return hostInput, port
+	fmt.Println("=== 💬 WebSocket чат-сервер (Go) ===")
+	fmt.Printf("Используются настройки из переменных окружения:\n")
+	fmt.Printf("Адрес сервера: %s\n", host)
+	fmt.Printf("Порт сервера: %d\n", port)
+
+	return host, port
 }
 
 func main() {

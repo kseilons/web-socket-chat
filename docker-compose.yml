@@ -1,0 +1,18 @@
+services:
+  websocket-server:
+    build: .
+    container_name: websocket-chat-server
+    ports:
+      - "${SERVER_PORT:-12345}:12345"
+    environment:
+      - SERVER_HOST=${SERVER_HOST:-0.0.0.0}
+      - SERVER_PORT=${SERVER_PORT:-12345}
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - websocket-network
+
+networks:
+  websocket-network:
+    driver: bridge
