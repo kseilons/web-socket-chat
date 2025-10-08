@@ -1,16 +1,18 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"net"
+	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // JSON структуры для сообщений
@@ -27,10 +29,10 @@ type Message struct {
 }
 
 type Client struct {
-	conn          net.Conn
+	conn          *websocket.Conn
 	nickname      string
 	address       string
-	writer        *bufio.Writer
+	send          chan Message
 	blocked       map[string]bool
 	favoriteUsers map[string]bool
 }
@@ -49,50 +51,51 @@ type Mailbox struct {
 type ChatServer struct {
 	host         string
 	port         int
-	listener     net.Listener
-	clients      []*Client
+	clients      map[*Client]bool
 	mutex        sync.Mutex
 	running      bool
 	userHistory  map[string]string
 	historyMutex sync.RWMutex
 	mailboxes    map[string]*Mailbox // никнейм -> почтовый ящик
 	mailboxMutex sync.RWMutex
+	upgrader     websocket.Upgrader
 }
 
 func NewChatServer(host string, port int) *ChatServer {
 	return &ChatServer{
 		host:        host,
 		port:        port,
-		clients:     make([]*Client, 0),
+		clients:     make(map[*Client]bool),
 		running:     false,
 		userHistory: make(map[string]string),
 		mailboxes:   make(map[string]*Mailbox),
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return true // Разрешаем подключения с любых источников
+			},
+		},
 	}
 }
 
-// Функции для работы с JSON сообщениями
+// Функции для работы с WebSocket сообщениями
 func (s *ChatServer) sendJSONMessage(client *Client, msg Message) error {
-	jsonData, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("ошибка сериализации JSON: %v", err)
+	select {
+	case client.send <- msg:
+		return nil
+	default:
+		close(client.send)
+		return fmt.Errorf("канал отправки заблокирован")
 	}
-
-	_, err = client.writer.WriteString(string(jsonData) + "\n")
-	if err != nil {
-		return err
-	}
-	return client.writer.Flush()
 }
 
-func (s *ChatServer) readJSONMessage(reader *bufio.Reader) (*Message, error) {
-	line, err := reader.ReadString('\n')
+func (s *ChatServer) readJSONMessage(conn *websocket.Conn) (*Message, error) {
+	_, message, err := conn.ReadMessage()
 	if err != nil {
 		return nil, err
 	}
 
-	line = strings.TrimSpace(line)
 	var msg Message
-	err = json.Unmarshal([]byte(line), &msg)
+	err = json.Unmarshal(message, &msg)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка парсинга JSON: %v", err)
 	}
@@ -102,39 +105,215 @@ func (s *ChatServer) readJSONMessage(reader *bufio.Reader) (*Message, error) {
 
 func (s *ChatServer) Start() error {
 	address := fmt.Sprintf("%s:%d", s.host, s.port)
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return fmt.Errorf("не удалось запустить сервер: %v", err)
-	}
-
-	s.listener = listener
 	s.running = true
 
-	fmt.Printf("🚀 Чат-сервер запущен на %s\n", address)
+	// Настраиваем HTTP маршруты
+	http.HandleFunc("/ws", s.handleWebSocket)
+	http.HandleFunc("/", s.handleHome)
+
+	fmt.Printf("🚀 WebSocket чат-сервер запущен на %s\n", address)
+	fmt.Println("WebSocket endpoint: ws://" + address + "/ws")
 	fmt.Println("Ожидание подключений...")
-	fmt.Println("Личные сообщения: @никнейм сообщение")
 
 	// Обработка сигналов для graceful shutdown
 	go s.handleSignals()
 
-	// Основной цикл принятия подключений
-	for s.running {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			if s.running {
-				fmt.Printf("❌ Ошибка accept: %v\n", err)
-			}
-			continue
-		}
+	// Запускаем HTTP сервер
+	return http.ListenAndServe(address, nil)
+}
 
-		clientAddr := conn.RemoteAddr().String()
-		fmt.Printf("📱 Новое подключение: %s\n", clientAddr)
+func (s *ChatServer) handleHome(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Chat Server</title>
+</head>
+<body>
+    <h1>WebSocket Chat Server</h1>
+    <p>Сервер запущен и готов к подключениям</p>
+    <p>WebSocket endpoint: <code>ws://%s:%d/ws</code></p>
+</body>
+</html>
+`, s.host, s.port)
+}
 
-		// Обрабатываем клиента в отдельной горутине
-		go s.handleClient(conn, clientAddr)
+func (s *ChatServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("❌ Ошибка обновления до WebSocket: %v", err)
+		return
 	}
 
-	return nil
+	clientAddr := r.RemoteAddr
+	fmt.Printf("📱 Новое WebSocket подключение: %s\n", clientAddr)
+
+	// Создаем клиента
+	client := &Client{
+		conn:          conn,
+		address:       clientAddr,
+		send:          make(chan Message, 256),
+		blocked:       make(map[string]bool),
+		favoriteUsers: make(map[string]bool),
+	}
+
+	// Добавляем клиента в список
+	s.addClient(client)
+
+	// Запускаем горутины для чтения и записи
+	go s.writePump(client)
+	go s.readPump(client)
+}
+
+// writePump отправляет сообщения клиенту
+func (s *ChatServer) writePump(client *Client) {
+	defer client.conn.Close()
+
+	for {
+		select {
+		case message, ok := <-client.send:
+			client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if !ok {
+				client.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			w, err := client.conn.NextWriter(websocket.TextMessage)
+			if err != nil {
+				return
+			}
+
+			jsonData, err := json.Marshal(message)
+			if err != nil {
+				log.Printf("❌ Ошибка сериализации JSON: %v", err)
+				return
+			}
+
+			w.Write(jsonData)
+
+			// Закрываем writer
+			if err := w.Close(); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// readPump читает сообщения от клиента
+func (s *ChatServer) readPump(client *Client) {
+	defer func() {
+		s.disconnectClient(client)
+		client.conn.Close()
+	}()
+
+	// Сначала обрабатываем аутентификацию
+	if !s.handleAuthentication(client) {
+		return
+	}
+
+	// Основной цикл чтения сообщений
+	for {
+		msg, err := s.readJSONMessage(client.conn)
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("❌ WebSocket ошибка: %v", err)
+			}
+			break
+		}
+
+		s.handleClientMessage(client, msg)
+	}
+}
+
+func (s *ChatServer) handleAuthentication(client *Client) bool {
+	// Извлекаем IP из адреса
+	ip := strings.Split(client.address, ":")[0]
+
+	// Проверяем историю для этого IP
+	previousNickname := s.getPreviousNickname(ip)
+
+	// Если есть предыдущий никнейм, предлагаем его
+	if previousNickname != "" {
+		msg := Message{
+			Type:    "nick_prompt",
+			Content: previousNickname,
+		}
+		s.sendJSONMessage(client, msg)
+		fmt.Printf("📝 Предлагаем никнейм '%s' для IP %s\n", previousNickname, ip)
+	} else {
+		msg := Message{Type: "nick_request"}
+		s.sendJSONMessage(client, msg)
+	}
+
+	// Читаем JSON сообщение с никнеймом
+	nickMsg, err := s.readJSONMessage(client.conn)
+	if err != nil {
+		fmt.Printf("❌ Ошибка чтения никнейма от %s: %v\n", client.address, err)
+		return false
+	}
+
+	if nickMsg.Type != "nick" {
+		errorMsg := Message{
+			Type:  "error",
+			Error: "Ожидается сообщение с никнеймом",
+		}
+		s.sendJSONMessage(client, errorMsg)
+		return false
+	}
+
+	nickname := strings.TrimSpace(nickMsg.Content)
+	if nickname == "" {
+		errorMsg := Message{
+			Type:  "error",
+			Error: "Никнейм не может быть пустым",
+		}
+		s.sendJSONMessage(client, errorMsg)
+		return false
+	}
+
+	// Проверяем, не занят ли никнейм
+	if s.isNicknameTaken(nickname) {
+		errorMsg := Message{
+			Type:  "error",
+			Error: "Никнейм уже занят",
+		}
+		s.sendJSONMessage(client, errorMsg)
+		return false
+	}
+
+	// Сохраняем в историю
+	s.saveNicknameHistory(ip, nickname)
+
+	// Устанавливаем никнейм клиента
+	client.nickname = nickname
+
+	// Отправляем подтверждение
+	successMsg := Message{Type: "nick_ok"}
+	s.sendJSONMessage(client, successMsg)
+
+	// ТОЛЬКО ПОСЛЕ успешной аутентификации доставляем отложенные сообщения
+	s.deliverOfflineMessages(client)
+
+	// Уведомляем всех о новом пользователе
+	joinMessage := fmt.Sprintf("🟢 %s присоединился к чату", nickname)
+
+	// Добавляем информацию о повторном входе, если применимо
+	if previousNickname != "" && previousNickname == nickname {
+		joinMessage = fmt.Sprintf("🟢 %s вернулся в чат", nickname)
+	}
+
+	s.broadcastJSONMessage(Message{
+		Type:      "system",
+		Content:   joinMessage,
+		Timestamp: time.Now().Format("15:04:05"),
+	}, client)
+	fmt.Printf("✅ %s (%s) присоединился к чату\n", nickname, client.address)
+
+	// Отправляем список пользователей новому клиенту
+	s.sendUserListJSON(client)
+
+	return true
 }
 
 func (s *ChatServer) getOrCreateMailbox(nickname string) *Mailbox {
@@ -238,137 +417,12 @@ func (s *ChatServer) findClientByNickname(nickname string) *Client {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	for _, client := range s.clients {
+	for client := range s.clients {
 		if client.nickname == nickname {
 			return client
 		}
 	}
 	return nil
-}
-
-func (s *ChatServer) handleClient(conn net.Conn, address string) {
-	var nickname string
-	var client *Client
-
-	defer func() {
-		if client != nil {
-			s.disconnectClient(client)
-		} else {
-			conn.Close()
-		}
-	}()
-
-	// Извлекаем IP из адреса
-	ip := strings.Split(address, ":")[0]
-
-	// Проверяем историю для этого IP
-	previousNickname := s.getPreviousNickname(ip)
-
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
-
-	// Если есть предыдущий никнейм, предлагаем его
-	if previousNickname != "" {
-		msg := Message{
-			Type:    "nick_prompt",
-			Content: previousNickname,
-		}
-		s.sendJSONMessage(&Client{writer: writer}, msg)
-		fmt.Printf("📝 Предлагаем никнейм '%s' для IP %s\n", previousNickname, ip)
-	} else {
-		msg := Message{Type: "nick_request"}
-		s.sendJSONMessage(&Client{writer: writer}, msg)
-	}
-
-	// Читаем JSON сообщение с никнеймом
-	nickMsg, err := s.readJSONMessage(reader)
-	if err != nil {
-		fmt.Printf("❌ Ошибка чтения никнейма от %s: %v\n", address, err)
-		return
-	}
-
-	if nickMsg.Type != "nick" {
-		errorMsg := Message{
-			Type:  "error",
-			Error: "Ожидается сообщение с никнеймом",
-		}
-		s.sendJSONMessage(&Client{writer: writer}, errorMsg)
-		return
-	}
-
-	nickname = strings.TrimSpace(nickMsg.Content)
-	if nickname == "" {
-		errorMsg := Message{
-			Type:  "error",
-			Error: "Никнейм не может быть пустым",
-		}
-		s.sendJSONMessage(&Client{writer: writer}, errorMsg)
-		return
-	}
-
-	// Проверяем, не занят ли никнейм
-	if s.isNicknameTaken(nickname) {
-		errorMsg := Message{
-			Type:  "error",
-			Error: "Никнейм уже занят",
-		}
-		s.sendJSONMessage(&Client{writer: writer}, errorMsg)
-		return
-	}
-
-	// Сохраняем в историю
-	s.saveNicknameHistory(ip, nickname)
-
-	// Создаем клиента с инициализированной картой blocked
-	client = &Client{
-		conn:          conn,
-		nickname:      nickname,
-		address:       address,
-		writer:        writer,
-		blocked:       make(map[string]bool),
-		favoriteUsers: make(map[string]bool),
-	}
-
-	// Добавляем клиента в список
-	s.addClient(client)
-
-	// Отправляем подтверждение
-	successMsg := Message{Type: "nick_ok"}
-	s.sendJSONMessage(client, successMsg)
-
-	// ТОЛЬКО ПОСЛЕ успешной аутентификации доставляем отложенные сообщения
-	s.deliverOfflineMessages(client)
-
-	// Уведомляем всех о новом пользователе
-	joinMessage := fmt.Sprintf("🟢 %s присоединился к чату", nickname)
-
-	// Добавляем информацию о повторном входе, если применимо
-	if previousNickname != "" && previousNickname == nickname {
-		joinMessage = fmt.Sprintf("🟢 %s вернулся в чат", nickname)
-	}
-
-	s.broadcastJSONMessage(Message{
-		Type:      "system",
-		Content:   joinMessage,
-		Timestamp: time.Now().Format("15:04:05"),
-	}, client)
-	fmt.Printf("✅ %s (%s) присоединился к чату\n", nickname, address)
-
-	// Отправляем список пользователей новому клиенту
-	s.sendUserListJSON(client)
-
-	// Обработка сообщений от клиента
-	for s.running {
-		msg, err := s.readJSONMessage(reader)
-		if err != nil {
-			if s.running {
-				fmt.Printf("❌ Ошибка чтения сообщения от %s: %v\n", nickname, err)
-			}
-			break
-		}
-
-		s.handleClientMessage(client, msg)
-	}
 }
 
 func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
@@ -617,20 +671,17 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 	}
 }
 
-func (s *ChatServer) sendToClient(client *Client, message string) {
-	client.writer.WriteString(message + "\n")
-	client.writer.Flush()
-}
-
 func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 	s.mutex.Lock()
-	clients := make([]*Client, len(s.clients))
-	copy(clients, s.clients)
+	clients := make(map[*Client]bool)
+	for client := range s.clients {
+		clients[client] = true
+	}
 	s.mutex.Unlock()
 
 	var disconnected []*Client
 
-	for _, client := range clients {
+	for client := range clients {
 		if exclude != nil && client == exclude {
 			continue
 		}
@@ -690,7 +741,7 @@ func (s *ChatServer) isNicknameTaken(nickname string) bool {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	for _, client := range s.clients {
+	for client := range s.clients {
 		if client.nickname == nickname {
 			return true
 		}
@@ -701,19 +752,13 @@ func (s *ChatServer) isNicknameTaken(nickname string) bool {
 func (s *ChatServer) addClient(client *Client) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.clients = append(s.clients, client)
+	s.clients[client] = true
 }
 
 func (s *ChatServer) removeClient(client *Client) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-
-	for i, c := range s.clients {
-		if c == client {
-			s.clients = append(s.clients[:i], s.clients[i+1:]...)
-			break
-		}
-	}
+	delete(s.clients, client)
 }
 
 func (s *ChatServer) sendUserListJSON(client *Client) {
@@ -721,7 +766,7 @@ func (s *ChatServer) sendUserListJSON(client *Client) {
 	defer s.mutex.Unlock()
 
 	var users []string
-	for _, c := range s.clients {
+	for c := range s.clients {
 		users = append(users, c.nickname)
 	}
 
@@ -768,16 +813,12 @@ func (s *ChatServer) Shutdown() {
 
 	// Закрываем все клиентские соединения
 	s.mutex.Lock()
-	for _, client := range s.clients {
+	for client := range s.clients {
+		close(client.send)
 		client.conn.Close()
 	}
-	s.clients = nil
+	s.clients = make(map[*Client]bool)
 	s.mutex.Unlock()
-
-	// Закрываем listener
-	if s.listener != nil {
-		s.listener.Close()
-	}
 
 	fmt.Println("✅ Сервер остановлен")
 }

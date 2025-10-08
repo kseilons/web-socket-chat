@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // JSON структуры для сообщений (должны совпадать с сервером)
@@ -25,14 +28,13 @@ type Message struct {
 }
 
 type ChatClient struct {
-	conn          net.Conn
+	conn          *websocket.Conn
 	nickname      string
 	server        string
 	port          int
 	running       bool
-	reader        *bufio.Reader
-	writer        *bufio.Writer
 	consoleReader *bufio.Reader
+	done          chan struct{}
 }
 
 func NewChatClient(server string, port int) *ChatClient {
@@ -41,47 +43,43 @@ func NewChatClient(server string, port int) *ChatClient {
 		port:          port,
 		running:       true,
 		consoleReader: bufio.NewReader(os.Stdin),
+		done:          make(chan struct{}),
 	}
 }
 
 func (c *ChatClient) Connect() error {
-	address := net.JoinHostPort(c.server, fmt.Sprintf("%d", c.port))
-	conn, err := net.Dial("tcp", address)
+	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", c.server, c.port), Path: "/ws"}
+
+	fmt.Printf("Подключение к %s...\n", u.String())
+
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		return fmt.Errorf("не удалось подключиться к серверу: %v", err)
+		return fmt.Errorf("не удалось подключиться к WebSocket серверу: %v", err)
 	}
 
 	c.conn = conn
-	c.reader = bufio.NewReader(conn)
-	c.writer = bufio.NewWriter(conn)
-
-	fmt.Printf("✅ Подключено к серверу %s\n", address)
+	fmt.Printf("✅ Подключено к WebSocket серверу %s\n", u.String())
 	return nil
 }
 
-// Функции для работы с JSON сообщениями
+// Функции для работы с WebSocket сообщениями
 func (c *ChatClient) sendJSONMessage(msg Message) error {
 	jsonData, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("ошибка сериализации JSON: %v", err)
 	}
 
-	_, err = c.writer.WriteString(string(jsonData) + "\n")
-	if err != nil {
-		return err
-	}
-	return c.writer.Flush()
+	return c.conn.WriteMessage(websocket.TextMessage, jsonData)
 }
 
 func (c *ChatClient) readJSONMessage() (*Message, error) {
-	line, err := c.reader.ReadString('\n')
+	_, message, err := c.conn.ReadMessage()
 	if err != nil {
 		return nil, err
 	}
 
-	line = strings.TrimSpace(line)
 	var msg Message
-	err = json.Unmarshal([]byte(line), &msg)
+	err = json.Unmarshal(message, &msg)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка парсинга JSON: %v", err)
 	}
@@ -159,9 +157,10 @@ func (c *ChatClient) Login() error {
 }
 
 func (c *ChatClient) Start() {
+	// Запускаем горутину для чтения сообщений
 	go c.readMessages()
 
-	fmt.Println("\n💬 Добро пожаловать в чат!")
+	fmt.Println("\n💬 Добро пожаловать в WebSocket чат!")
 	fmt.Println("Доступные команды:")
 	fmt.Println("  #help - показать справку")
 	fmt.Println("  #users - список пользователей")
@@ -484,9 +483,12 @@ func (c *ChatClient) handleFavList(msg *Message) {
 
 func (c *ChatClient) cleanup() {
 	if c.conn != nil {
+		// Отправляем сообщение о закрытии соединения
+		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		time.Sleep(time.Second) // Даем время на отправку сообщения
 		c.conn.Close()
 	}
-	fmt.Println("✅ Соединение закрыто")
+	fmt.Println("✅ WebSocket соединение закрыто")
 }
 
 func (c *ChatClient) WaitForInterrupt() {
