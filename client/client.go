@@ -320,14 +320,14 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 		// Личное сообщение
 		c.printPrivateMessage(msg)
 	case "private_sent":
-		// Подтверждение отправки личного сообщения
-		c.printPrivateSentMessage(msg)
+		// Подтверждение отправки личного сообщения - не показываем
+		// Просто игнорируем это сообщение
 	case "mass_private":
 		// Массовое личное сообщение
 		c.printMassPrivateMessage(msg)
 	case "mass_private_sent":
-		// Подтверждение отправки массового сообщения
-		c.printMassPrivateSentMessage(msg)
+		// Подтверждение отправки массового сообщения - не показываем
+		// Просто игнорируем это сообщение
 	case "system":
 		// Системное сообщение
 		c.printSystemMessage(msg)
