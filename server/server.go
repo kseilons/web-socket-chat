@@ -452,14 +452,21 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 
 			timestamp := time.Now().Format("15:04:05")
 			// Отправляем получателю
-			s.sendJSONMessage(targetClient, Message{
+			privateMsg := Message{
 				Type:      "private",
 				Content:   msg.Content,
 				From:      client.nickname,
 				To:        msg.To,
 				Timestamp: timestamp,
 				Flags:     map[string]bool{"private": true},
-			})
+			}
+
+			// Добавляем флаг "favorite" если отправитель в списке любимых получателя
+			if targetClient.favoriteUsers[client.nickname] {
+				privateMsg.Flags["favorite"] = true
+			}
+
+			s.sendJSONMessage(targetClient, privateMsg)
 			// Отправляем подтверждение отправителю
 			s.sendJSONMessage(client, Message{
 				Type:      "private_sent",
@@ -686,8 +693,8 @@ func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 			continue
 		}
 
-		// Проверяем блокировку для личных сообщений
-		if msg.Type == "private" && client.blocked[msg.From] {
+		// Проверяем блокировку для личных и массовых сообщений
+		if (msg.Type == "private" || msg.Type == "mass_private") && client.blocked[msg.From] {
 			continue
 		}
 
@@ -695,7 +702,7 @@ func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 		clientMsg := msg
 
 		// Добавляем флаг "favorite" если отправитель в списке любимых получателя
-		if msg.Type == "chat" && client.favoriteUsers[msg.From] {
+		if (msg.Type == "chat" || msg.Type == "mass_private") && client.favoriteUsers[msg.From] {
 			if clientMsg.Flags == nil {
 				clientMsg.Flags = make(map[string]bool)
 			}
