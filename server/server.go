@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,12 +32,13 @@ type Message struct {
 }
 
 type Client struct {
-	conn          *websocket.Conn
-	nickname      string
-	address       string
-	send          chan Message
-	blocked       map[string]bool
-	favoriteUsers map[string]bool
+	conn            *websocket.Conn
+	nickname        string
+	address         string
+	send            chan Message
+	blocked         map[string]bool
+	favoriteUsers   map[string]bool
+	showWordLengths bool
 }
 
 type MailboxMessage struct {
@@ -104,6 +107,16 @@ func (s *ChatServer) readJSONMessage(conn *websocket.Conn) (*Message, error) {
 	return &msg, nil
 }
 
+// replaceWordsWithLengths заменяет слова в тексте на их длины
+func replaceWordsWithLengths(text string) string {
+	// Регулярное выражение для поиска слов (буквы, цифры, дефисы, апострофы)
+	wordRegex := regexp.MustCompile(`\b[\p{L}\p{N}'-]+\b`)
+
+	return wordRegex.ReplaceAllStringFunc(text, func(word string) string {
+		return strconv.Itoa(len(word))
+	})
+}
+
 func (s *ChatServer) Start() error {
 	address := fmt.Sprintf("%s:%d", s.host, s.port)
 	s.running = true
@@ -152,11 +165,12 @@ func (s *ChatServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Создаем клиента
 	client := &Client{
-		conn:          conn,
-		address:       clientAddr,
-		send:          make(chan Message, 256),
-		blocked:       make(map[string]bool),
-		favoriteUsers: make(map[string]bool),
+		conn:            conn,
+		address:         clientAddr,
+		send:            make(chan Message, 256),
+		blocked:         make(map[string]bool),
+		favoriteUsers:   make(map[string]bool),
+		showWordLengths: false,
 	}
 
 	// Добавляем клиента в список
@@ -362,9 +376,16 @@ func (s *ChatServer) deliverOfflineMessages(client *Client) {
 	// Доставляем все сообщения
 	for _, msg := range mailbox.Messages {
 		timestamp := msg.Time.Format("15:04:05")
+		content := msg.Message
+
+		// Применяем фильтр длин слов если включен
+		if client.showWordLengths {
+			content = replaceWordsWithLengths(msg.Message)
+		}
+
 		s.sendJSONMessage(client, Message{
 			Type:      "offline_message",
-			Content:   msg.Message,
+			Content:   content,
 			From:      msg.From,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"offline": true},
@@ -671,6 +692,17 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			})
 		}
 
+	case "wordlengths":
+		client.showWordLengths = !client.showWordLengths
+		status := "выключен"
+		if client.showWordLengths {
+			status = "включен"
+		}
+		s.sendJSONMessage(client, Message{
+			Type:    "wordlengths_toggle",
+			Content: fmt.Sprintf("Режим показа длин слов %s", status),
+		})
+
 	default:
 		s.sendJSONMessage(client, Message{
 			Type:  "error",
@@ -701,6 +733,11 @@ func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 
 		// Создаем копию сообщения для каждого клиента
 		clientMsg := msg
+
+		// Применяем фильтр длин слов если включен
+		if client.showWordLengths && (msg.Type == "chat" || msg.Type == "private" || msg.Type == "mass_private") {
+			clientMsg.Content = replaceWordsWithLengths(msg.Content)
+		}
 
 		// Добавляем флаг "favorite" если отправитель в списке любимых получателя
 		if (msg.Type == "chat" || msg.Type == "mass_private") && client.favoriteUsers[msg.From] {
@@ -737,6 +774,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#fav clear":     "очистить список",
 		"#block ник":     "добавить в чёрный список",
 		"#unblock ник":   "убрать из чёрного списка",
+		"#wordlengths":   "переключить режим показа длин слов",
 		"/quit":          "выход из чата",
 	}
 
