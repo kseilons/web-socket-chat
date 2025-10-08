@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -840,11 +841,45 @@ func (s *ChatServer) handleSignals() {
 	os.Exit(0)
 }
 
-func main() {
-	fmt.Println("=== 💬 Многопользовательский чат-сервер (Go) ===")
-	fmt.Println("Для остановки нажмите Ctrl+C")
+func getServerConfig() (string, int) {
+	reader := bufio.NewReader(os.Stdin)
 
-	server := NewChatServer("0.0.0.0", 12345)
+	fmt.Println("=== 💬 WebSocket чат-сервер (Go) ===")
+	fmt.Println("Введите адрес сервера (по умолчанию: 0.0.0.0)")
+	fmt.Print("Адрес сервера [0.0.0.0]: ")
+
+	hostInput, _ := reader.ReadString('\n')
+	hostInput = strings.TrimSpace(hostInput)
+
+	if hostInput == "" {
+		hostInput = "0.0.0.0"
+	}
+
+	fmt.Print("Введите порт сервера (по умолчанию: 12345): ")
+	portInput, _ := reader.ReadString('\n')
+	portInput = strings.TrimSpace(portInput)
+
+	var port int
+	if portInput == "" {
+		port = 12345
+	} else {
+		if _, err := fmt.Sscanf(portInput, "%d", &port); err != nil || port <= 0 || port >= 65536 {
+			fmt.Printf("❌ Неверный порт, используем порт по умолчанию: 12345\n")
+			port = 12345
+		}
+	}
+
+	return hostInput, port
+}
+
+func main() {
+	host, port := getServerConfig()
+
+	fmt.Printf("🚀 Запуск сервера на %s:%d\n", host, port)
+	fmt.Println("Для остановки нажмите Ctrl+C")
+	fmt.Println()
+
+	server := NewChatServer(host, port)
 
 	err := server.Start()
 	if err != nil {
