@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +10,19 @@ import (
 	"strings"
 	"syscall"
 )
+
+// JSON структуры для сообщений (должны совпадать с сервером)
+type Message struct {
+	Type      string            `json:"type"`
+	Content   string            `json:"content,omitempty"`
+	From      string            `json:"from,omitempty"`
+	To        string            `json:"to,omitempty"`
+	Timestamp string            `json:"timestamp,omitempty"`
+	Users     []string          `json:"users,omitempty"`
+	Flags     map[string]bool   `json:"flags,omitempty"`
+	Error     string            `json:"error,omitempty"`
+	Data      map[string]string `json:"data,omitempty"`
+}
 
 type ChatClient struct {
 	conn          net.Conn
@@ -18,10 +32,7 @@ type ChatClient struct {
 	running       bool
 	reader        *bufio.Reader
 	writer        *bufio.Writer
-	favoriteUser  string
 	consoleReader *bufio.Reader
-	blocked       map[string]bool // локальный чёрный список
-	favoriteUsers map[string]bool
 }
 
 func NewChatClient(server string, port int) *ChatClient {
@@ -30,13 +41,11 @@ func NewChatClient(server string, port int) *ChatClient {
 		port:          port,
 		running:       true,
 		consoleReader: bufio.NewReader(os.Stdin),
-		blocked:       make(map[string]bool),
-		favoriteUsers: make(map[string]bool),
 	}
 }
 
 func (c *ChatClient) Connect() error {
-	address := fmt.Sprintf("%s:%d", c.server, c.port)
+	address := net.JoinHostPort(c.server, fmt.Sprintf("%d", c.port))
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return fmt.Errorf("не удалось подключиться к серверу: %v", err)
@@ -50,21 +59,48 @@ func (c *ChatClient) Connect() error {
 	return nil
 }
 
+// Функции для работы с JSON сообщениями
+func (c *ChatClient) sendJSONMessage(msg Message) error {
+	jsonData, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("ошибка сериализации JSON: %v", err)
+	}
+
+	_, err = c.writer.WriteString(string(jsonData) + "\n")
+	if err != nil {
+		return err
+	}
+	return c.writer.Flush()
+}
+
+func (c *ChatClient) readJSONMessage() (*Message, error) {
+	line, err := c.reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+
+	line = strings.TrimSpace(line)
+	var msg Message
+	err = json.Unmarshal([]byte(line), &msg)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка парсинга JSON: %v", err)
+	}
+
+	return &msg, nil
+}
+
 func (c *ChatClient) Login() error {
 	// Читаем первоначальный ответ от сервера
-	initialResponse, err := c.reader.ReadString('\n')
+	initialMsg, err := c.readJSONMessage()
 	if err != nil {
 		return fmt.Errorf("ошибка получения приветствия от сервера: %v", err)
 	}
 
-	initialResponse = strings.TrimSpace(initialResponse)
-
 	var nickname string
 
-	if strings.HasPrefix(initialResponse, "NICK_PROMPT:") {
+	if initialMsg.Type == "nick_prompt" {
 		// Сервер предлагает предыдущий никнейм
-		suggestedNick := strings.TrimPrefix(initialResponse, "NICK_PROMPT:")
-		suggestedNick = strings.TrimSpace(suggestedNick)
+		suggestedNick := initialMsg.Content
 
 		fmt.Printf("🕒 Найден ваш предыдущий никнейм: %s\n", suggestedNick)
 		fmt.Print("Нажмите Enter чтобы использовать его, или введите новый никнейм: ")
@@ -81,7 +117,7 @@ func (c *ChatClient) Login() error {
 		} else {
 			nickname = input
 		}
-	} else if initialResponse == "NICK_REQUEST" {
+	} else if initialMsg.Type == "nick_request" {
 		// Сервер запрашивает новый никнейм
 		fmt.Print("Введите ваш никнейм: ")
 		input, err := c.consoleReader.ReadString('\n')
@@ -90,31 +126,32 @@ func (c *ChatClient) Login() error {
 		}
 		nickname = strings.TrimSpace(input)
 	} else {
-		return fmt.Errorf("неожиданный ответ от сервера: %s", initialResponse)
+		return fmt.Errorf("неожиданный ответ от сервера: %s", initialMsg.Type)
 	}
 
 	// Отправляем выбранный никнейм серверу
 	c.nickname = nickname
-	nickMsg := fmt.Sprintf("NICK:%s\n", nickname)
-	_, err = c.writer.WriteString(nickMsg)
+	nickMsg := Message{
+		Type:    "nick",
+		Content: nickname,
+	}
+	err = c.sendJSONMessage(nickMsg)
 	if err != nil {
 		return fmt.Errorf("ошибка отправки никнейма: %v", err)
 	}
-	c.writer.Flush()
 
 	// Получаем подтверждение от сервера
-	response, err := c.reader.ReadString('\n')
+	response, err := c.readJSONMessage()
 	if err != nil {
 		return fmt.Errorf("ошибка получения ответа от сервера: %v", err)
 	}
 
-	response = strings.TrimSpace(response)
-	if response == "NICK_TAKEN" {
-		return fmt.Errorf("никнейм '%s' уже занят", nickname)
+	if response.Type == "error" {
+		return fmt.Errorf("ошибка сервера: %s", response.Error)
 	}
 
-	if response != "NICK_OK" {
-		return fmt.Errorf("неожиданный ответ от сервера: %s", response)
+	if response.Type != "nick_ok" {
+		return fmt.Errorf("неожиданный ответ от сервера: %s", response.Type)
 	}
 
 	fmt.Println("✅ Никнейм принят сервером")
@@ -155,37 +192,113 @@ func (c *ChatClient) Start() {
 			break
 		}
 
-		// Обработка команды #fav на клиенте
-		if strings.HasPrefix(message, "#fav") {
-			// Просто отправляем команду на сервер, ответ придет в readMessages
-			_, err = c.writer.WriteString(message + "\n")
-			if err != nil {
-				fmt.Printf("❌ Ошибка отправки команды: %v\n", err)
-			} else {
-				c.writer.Flush()
-			}
-			continue
-		}
-
 		if message == "" {
 			continue
 		}
 
-		_, err = c.writer.WriteString(message + "\n")
-		if err != nil {
-			fmt.Printf("❌ Ошибка отправки сообщения: %v\n", err)
-			c.running = false
-			break
+		// Обработка команд
+		if strings.HasPrefix(message, "#") {
+			c.handleCommand(message)
+		} else if strings.HasPrefix(message, "@") {
+			c.handlePrivateMessage(message)
+		} else {
+			// Обычное сообщение
+			msg := Message{
+				Type:    "message",
+				Content: message,
+			}
+			err = c.sendJSONMessage(msg)
+			if err != nil {
+				fmt.Printf("❌ Ошибка отправки сообщения: %v\n", err)
+				c.running = false
+				break
+			}
 		}
-		c.writer.Flush()
 	}
 
 	c.cleanup()
 }
 
+func (c *ChatClient) handleCommand(message string) {
+	parts := strings.SplitN(message, " ", 2)
+	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "#"))
+
+	msg := Message{
+		Type: "command",
+		Data: make(map[string]string),
+	}
+	msg.Data["command"] = cmd
+
+	switch cmd {
+	case "help", "users", "mailbox":
+		// Простые команды без параметров
+	case "all":
+		if len(parts) < 2 {
+			fmt.Println("❌ Использование: #all сообщение")
+			return
+		}
+		msg.Data["content"] = parts[1]
+	case "block", "unblock":
+		if len(parts) < 2 {
+			fmt.Printf("❌ Использование: #%s ник\n", cmd)
+			return
+		}
+		msg.Data["target"] = parts[1]
+	case "fav":
+		if len(parts) < 2 {
+			msg.Data["action"] = "list"
+		} else {
+			subParts := strings.SplitN(parts[1], " ", 2)
+			if len(subParts) == 1 {
+				if strings.ToLower(subParts[0]) == "list" {
+					msg.Data["action"] = "list"
+				} else if strings.ToLower(subParts[0]) == "clear" {
+					msg.Data["action"] = "clear"
+				} else {
+					msg.Data["action"] = "add"
+					msg.Data["target"] = subParts[0]
+				}
+			} else {
+				msg.Data["action"] = subParts[0]
+				msg.Data["target"] = subParts[1]
+			}
+		}
+	default:
+		fmt.Printf("❌ Неизвестная команда: %s\n", cmd)
+		return
+	}
+
+	err := c.sendJSONMessage(msg)
+	if err != nil {
+		fmt.Printf("❌ Ошибка отправки команды: %v\n", err)
+	}
+}
+
+func (c *ChatClient) handlePrivateMessage(message string) {
+	parts := strings.SplitN(message, " ", 2)
+	if len(parts) < 2 {
+		fmt.Println("❌ Использование: @никнейм сообщение")
+		return
+	}
+
+	targetNick := strings.TrimPrefix(parts[0], "@")
+	privateMsg := parts[1]
+
+	msg := Message{
+		Type:    "private",
+		Content: privateMsg,
+		To:      targetNick,
+	}
+
+	err := c.sendJSONMessage(msg)
+	if err != nil {
+		fmt.Printf("❌ Ошибка отправки личного сообщения: %v\n", err)
+	}
+}
+
 func (c *ChatClient) readMessages() {
 	for c.running {
-		message, err := c.reader.ReadString('\n')
+		msg, err := c.readJSONMessage()
 		if err != nil {
 			if c.running {
 				fmt.Printf("\n❌ Ошибка чтения сообщения: %v\n", err)
@@ -195,185 +308,178 @@ func (c *ChatClient) readMessages() {
 			break
 		}
 
-		message = strings.TrimSpace(message)
-
-		// Обработка спец сообщений
-		if strings.HasPrefix(message, "USERS:") {
-			c.handleUserList(message)
-			continue
-		}
-
-		if strings.HasPrefix(message, "[📮]") {
-			c.printFormattedMessage(message)
-			continue
-		}
-
-		if strings.HasPrefix(message, "HELP:") {
-			c.handleHelp(message)
-			continue
-		}
-
-		// Обработка FAV_ сообщений от сервера
-		if strings.HasPrefix(message, "FAV_") {
-			c.handleFavResponse(message)
-			continue
-		}
-
-		// Проверка на блокировку
-		if c.isMessageBlocked(message) {
-			continue
-		}
-
-		// Подсветка сообщений
-		c.printFormattedMessage(message)
+		c.handleServerMessage(msg)
 	}
 }
 
-func (c *ChatClient) handleFavResponse(message string) {
-	if strings.HasPrefix(message, "FAV_LIST:") {
-		favListStr := strings.TrimPrefix(message, "FAV_LIST:")
-		if favListStr == "" {
-			fmt.Println("📝 Ваш список любимых писателей пуст")
-		} else {
-			favList := strings.Split(favListStr, ",")
-			// Обновляем локальный список
-			c.favoriteUsers = make(map[string]bool)
-			for _, user := range favList {
-				if user != "" {
-					c.favoriteUsers[user] = true
-				}
-			}
-			fmt.Printf("❤️ Ваши любимые писатели (%d): %s\n", len(favList), strings.Join(favList, ", "))
-		}
-	} else if message == "FAV_CLEARED" {
-		c.favoriteUsers = make(map[string]bool)
-		fmt.Println("✅ Список любимых писателей очищен")
-	} else if strings.HasPrefix(message, "FAV_ADDED:") {
-		target := strings.TrimPrefix(message, "FAV_ADDED:")
-		c.favoriteUsers[target] = true
-		fmt.Printf("❤️ %s добавлен в список любимых писателей\n", target)
-	} else if strings.HasPrefix(message, "FAV_REMOVED:") {
-		target := strings.TrimPrefix(message, "FAV_REMOVED:")
-		delete(c.favoriteUsers, target)
-		fmt.Printf("✅ %s удален из списка любимых писателей\n", target)
-	} else if strings.HasPrefix(message, "FAV_ERROR:") {
-		errorMsg := strings.TrimPrefix(message, "FAV_ERROR:")
-		fmt.Printf("❌ %s\n", errorMsg)
-	}
-	fmt.Print("> ")
-}
-
-func (c *ChatClient) isMessageBlocked(message string) bool {
-	for blockedUser := range c.blocked {
-		if strings.Contains(message, blockedUser) {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *ChatClient) printFormattedMessage(message string) {
-	// Проверяем, является ли отправитель любимым писателем
-	isFavorite := false
-	var messageSender string
-
-	// Пытаемся извлечь отправителя из сообщения (формат: "никнейм: сообщение")
-	if strings.Contains(message, ":") {
-		// Для обычных сообщений: "никнейм: сообщение"
-		if !strings.HasPrefix(message, "[") {
-			parts := strings.SplitN(message, ":", 2)
-			if len(parts) >= 2 {
-				messageSender = strings.TrimSpace(parts[0])
-				isFavorite = c.favoriteUsers[messageSender]
-			}
-		} else {
-			// Для сообщений с префиксом: "[МЛС][время] никнейм: сообщение" или "[ЛС][время] никнейм: сообщение"
-			// Ищем часть после последнего "]" которая содержит никнейм
-			lastBracket := strings.LastIndex(message, "]")
-			if lastBracket != -1 && lastBracket+1 < len(message) {
-				// Берем часть после последнего "]"
-				textAfterBracket := message[lastBracket+1:]
-				// Убираем пробелы в начале и ищем никнейм до двоеточия
-				textAfterBracket = strings.TrimSpace(textAfterBracket)
-				if strings.Contains(textAfterBracket, ":") {
-					parts := strings.SplitN(textAfterBracket, ":", 2)
-					if len(parts) >= 2 {
-						messageSender = strings.TrimSpace(parts[0])
-						isFavorite = c.favoriteUsers[messageSender]
-					}
-				}
-			}
-		}
-	}
-
-	// Определяем тип сообщения и цвет
-	switch {
-	case isFavorite:
-		// Сообщение от любимого писателя - специальное оформление (ВЫСШИЙ ПРИОРИТЕТ)
-		fmt.Printf("\n\033[1;33m✨ %s\033[0m\n> ", message) // золотой с эмодзи
-	case strings.HasPrefix(message, "[ЛС]"):
-		fmt.Printf("\n\033[36m%s\033[0m\n> ", message) // голубой
-	case strings.HasPrefix(message, "[МЛС]"):
-		fmt.Printf("\n\033[35m%s\033[0m\n> ", message) // фиолетовый
+func (c *ChatClient) handleServerMessage(msg *Message) {
+	switch msg.Type {
+	case "chat":
+		// Обычное сообщение в чат
+		c.printChatMessage(msg)
+	case "private":
+		// Личное сообщение
+		c.printPrivateMessage(msg)
+	case "private_sent":
+		// Подтверждение отправки личного сообщения
+		c.printPrivateSentMessage(msg)
+	case "mass_private":
+		// Массовое личное сообщение
+		c.printMassPrivateMessage(msg)
+	case "mass_private_sent":
+		// Подтверждение отправки массового сообщения
+		c.printMassPrivateSentMessage(msg)
+	case "system":
+		// Системное сообщение
+		c.printSystemMessage(msg)
+	case "users":
+		// Список пользователей
+		c.handleUserList(msg)
+	case "help":
+		// Справка
+		c.handleHelp(msg)
+	case "mailbox_status":
+		// Статус почтового ящика
+		c.printMailboxStatus(msg)
+	case "offline_message":
+		// Отложенное сообщение
+		c.printOfflineMessage(msg)
+	case "offline_delivered":
+		// Уведомление о доставке отложенных сообщений
+		c.printOfflineDelivered(msg)
+	case "offline_saved":
+		// Сообщение сохранено для оффлайн пользователя
+		c.printOfflineSaved(msg)
+	case "fav_list":
+		// Список любимых писателей
+		c.handleFavList(msg)
+	case "fav_added":
+		// Пользователь добавлен в любимые
+		c.printFavAdded(msg)
+	case "fav_removed":
+		// Пользователь удален из любимых
+		c.printFavRemoved(msg)
+	case "fav_cleared":
+		// Список любимых очищен
+		c.printFavCleared(msg)
+	case "blocked":
+		// Пользователь заблокирован
+		c.printBlocked(msg)
+	case "unblocked":
+		// Пользователь разблокирован
+		c.printUnblocked(msg)
+	case "error":
+		// Ошибка
+		c.printError(msg)
 	default:
-		// Обычное сообщение
-		fmt.Printf("\n%s\n> ", message)
+		fmt.Printf("❓ Неизвестный тип сообщения: %s\n", msg.Type)
 	}
 }
 
-func (c *ChatClient) handleUserList(message string) {
-	users := strings.TrimPrefix(message, "USERS:")
-	userList := strings.Split(users, ",")
+// Функции для обработки различных типов сообщений
+func (c *ChatClient) printChatMessage(msg *Message) {
+	// Проверяем флаги для определения типа сообщения
+	if msg.Flags != nil && msg.Flags["favorite"] {
+		// Сообщение от любимого писателя
+		fmt.Printf("\n\033[1;33m✨ [%s] %s: %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+	} else {
+		// Обычное сообщение
+		fmt.Printf("\n[%s] %s: %s\n> ", msg.Timestamp, msg.From, msg.Content)
+	}
+}
 
-	fmt.Printf("\n👥 Пользователи онлайн (%d):\n", len(userList))
-	for _, user := range userList {
+func (c *ChatClient) printPrivateMessage(msg *Message) {
+	fmt.Printf("\n\033[36m[ЛС][%s] %s: %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+}
+
+func (c *ChatClient) printPrivateSentMessage(msg *Message) {
+	fmt.Printf("\n\033[36m[ЛС][%s] Вы → %s: %s\033[0m\n> ", msg.Timestamp, msg.To, msg.Content)
+}
+
+func (c *ChatClient) printMassPrivateMessage(msg *Message) {
+	fmt.Printf("\n\033[35m[МЛС][%s] %s: %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+}
+
+func (c *ChatClient) printMassPrivateSentMessage(msg *Message) {
+	fmt.Printf("\n\033[35m[МЛС][%s] Вы: %s\033[0m\n> ", msg.Timestamp, msg.Content)
+}
+
+func (c *ChatClient) printSystemMessage(msg *Message) {
+	fmt.Printf("\n%s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printMailboxStatus(msg *Message) {
+	fmt.Printf("\n📬 %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printOfflineMessage(msg *Message) {
+	fmt.Printf("\n\033[33m[📮][%s] %s (оффлайн): %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+}
+
+func (c *ChatClient) printOfflineDelivered(msg *Message) {
+	fmt.Printf("\n📬 %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printOfflineSaved(msg *Message) {
+	fmt.Printf("\n📮 %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printFavAdded(msg *Message) {
+	fmt.Printf("\n❤️ %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printFavRemoved(msg *Message) {
+	fmt.Printf("\n✅ %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printFavCleared(msg *Message) {
+	fmt.Printf("\n✅ %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printBlocked(msg *Message) {
+	fmt.Printf("\n🚫 %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printUnblocked(msg *Message) {
+	fmt.Printf("\n✅ %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printError(msg *Message) {
+	fmt.Printf("\n❌ %s\n> ", msg.Error)
+}
+
+func (c *ChatClient) handleUserList(msg *Message) {
+	fmt.Printf("\n👥 Пользователи онлайн (%d):\n", len(msg.Users))
+	for _, user := range msg.Users {
 		if user != "" {
 			status := "🟢"
 			if user == c.nickname {
 				status = "🟡 (вы)"
-			} else if c.favoriteUsers[user] {
-				status = "❤️ " // любимый писатель
 			}
 			fmt.Printf("%s %s\n", status, user)
 		}
 	}
-
-	// Показываем статистику по любимым писателям
-	favCount := len(c.favoriteUsers)
-	if favCount > 0 {
-		var favList []string
-		for user := range c.favoriteUsers {
-			favList = append(favList, user)
-		}
-		fmt.Printf("❤️  Ваши любимые писатели (%d): %s\n", favCount, strings.Join(favList, ", "))
-	}
-
 	fmt.Print("> ")
 }
 
-func (c *ChatClient) handleHelp(message string) {
-	helpText := strings.TrimPrefix(message, "HELP:")
-
-	// Разбиваем текст по разделителю " | " для красивого отображения
-	commands := strings.Split(helpText, " | ")
-
-	fmt.Printf("\n\033[1;34m%s\033[0m\n", "📖 Справка по командам чата:")
+func (c *ChatClient) handleHelp(msg *Message) {
+	fmt.Printf("\n\033[1;34m📖 Справка по командам чата:\033[0m\n")
 	fmt.Println(strings.Repeat("─", 60))
-	fmt.Println("📖 Справка по командам:")
 
-	for _, cmd := range commands {
-
-		// Разделяем команду и описание
-		if strings.Contains(cmd, " - ") {
-			parts := strings.SplitN(cmd, " - ", 2)
-			fmt.Printf("\033[1;32m%-25s\033[0m %s\n", parts[0], parts[1])
-		} else {
-			fmt.Printf("  %s\n", cmd)
-		}
+	for cmd, desc := range msg.Data {
+		fmt.Printf("\033[1;32m%-25s\033[0m %s\n", cmd, desc)
 	}
 
 	fmt.Println(strings.Repeat("─", 60))
 	fmt.Print("> ")
+}
+
+func (c *ChatClient) handleFavList(msg *Message) {
+	if len(msg.Users) == 0 {
+		fmt.Printf("\n📝 %s\n> ", msg.Content)
+	} else {
+		fmt.Printf("\n❤️ %s\n> ", msg.Content)
+	}
 }
 
 func (c *ChatClient) cleanup() {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,19 @@ import (
 	"syscall"
 	"time"
 )
+
+// JSON структуры для сообщений
+type Message struct {
+	Type      string            `json:"type"`
+	Content   string            `json:"content,omitempty"`
+	From      string            `json:"from,omitempty"`
+	To        string            `json:"to,omitempty"`
+	Timestamp string            `json:"timestamp,omitempty"`
+	Users     []string          `json:"users,omitempty"`
+	Flags     map[string]bool   `json:"flags,omitempty"`
+	Error     string            `json:"error,omitempty"`
+	Data      map[string]string `json:"data,omitempty"`
+}
 
 type Client struct {
 	conn          net.Conn
@@ -54,6 +68,36 @@ func NewChatServer(host string, port int) *ChatServer {
 		userHistory: make(map[string]string),
 		mailboxes:   make(map[string]*Mailbox),
 	}
+}
+
+// Функции для работы с JSON сообщениями
+func (s *ChatServer) sendJSONMessage(client *Client, msg Message) error {
+	jsonData, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("ошибка сериализации JSON: %v", err)
+	}
+
+	_, err = client.writer.WriteString(string(jsonData) + "\n")
+	if err != nil {
+		return err
+	}
+	return client.writer.Flush()
+}
+
+func (s *ChatServer) readJSONMessage(reader *bufio.Reader) (*Message, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+
+	line = strings.TrimSpace(line)
+	var msg Message
+	err = json.Unmarshal([]byte(line), &msg)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка парсинга JSON: %v", err)
+	}
+
+	return &msg, nil
 }
 
 func (s *ChatServer) Start() error {
@@ -138,28 +182,41 @@ func (s *ChatServer) deliverOfflineMessages(client *Client) {
 	// Доставляем все сообщения
 	for _, msg := range mailbox.Messages {
 		timestamp := msg.Time.Format("15:04:05")
-		offlineMsg := fmt.Sprintf("[📮][%s] %s (оффлайн): %s", timestamp, msg.From, msg.Message)
-		s.sendToClient(client, offlineMsg)
+		s.sendJSONMessage(client, Message{
+			Type:      "offline_message",
+			Content:   msg.Message,
+			From:      msg.From,
+			Timestamp: timestamp,
+			Flags:     map[string]bool{"offline": true},
+		})
 	}
 
 	// Уведомляем пользователя
-	s.sendToClient(client, fmt.Sprintf("📬 Вам доставлено %d отложенных сообщений", len(mailbox.Messages)))
+	s.sendJSONMessage(client, Message{
+		Type:    "offline_delivered",
+		Content: fmt.Sprintf("Вам доставлено %d отложенных сообщений", len(mailbox.Messages)),
+	})
 
 	// Очищаем ящик после доставки
 	mailbox.Messages = make([]MailboxMessage, 0)
-
 }
 
-func (s *ChatServer) getMailboxStatus(client *Client) {
+func (s *ChatServer) getMailboxStatusJSON(client *Client) {
 	mailbox := s.getOrCreateMailbox(client.nickname)
 	mailbox.Mutex.RLock()
 	defer mailbox.Mutex.RUnlock()
 
 	count := len(mailbox.Messages)
 	if count == 0 {
-		s.sendToClient(client, "📭 Ваш почтовый ящик пуст")
+		s.sendJSONMessage(client, Message{
+			Type:    "mailbox_status",
+			Content: "Ваш почтовый ящик пуст",
+		})
 	} else {
-		s.sendToClient(client, fmt.Sprintf("📬 У вас %d отложенных сообщений", count))
+		s.sendJSONMessage(client, Message{
+			Type:    "mailbox_status",
+			Content: fmt.Sprintf("У вас %d отложенных сообщений", count),
+		})
 	}
 }
 
@@ -212,42 +269,50 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 
 	// Если есть предыдущий никнейм, предлагаем его
 	if previousNickname != "" {
-		prompt := fmt.Sprintf("NICK_PROMPT:%s\n", previousNickname)
-		writer.WriteString(prompt)
-		writer.Flush()
+		msg := Message{
+			Type:    "nick_prompt",
+			Content: previousNickname,
+		}
+		s.sendJSONMessage(&Client{writer: writer}, msg)
 		fmt.Printf("📝 Предлагаем никнейм '%s' для IP %s\n", previousNickname, ip)
 	} else {
-		writer.WriteString("NICK_REQUEST\n")
-		writer.Flush()
+		msg := Message{Type: "nick_request"}
+		s.sendJSONMessage(&Client{writer: writer}, msg)
 	}
 
-	nickRequest, err := reader.ReadString('\n')
+	// Читаем JSON сообщение с никнеймом
+	nickMsg, err := s.readJSONMessage(reader)
 	if err != nil {
 		fmt.Printf("❌ Ошибка чтения никнейма от %s: %v\n", address, err)
 		return
 	}
 
-	nickRequest = strings.TrimSpace(nickRequest)
-
-	// Обрабатываем ответ с предложенным никнеймом
-	if strings.HasPrefix(nickRequest, "NICK:") {
-		nickname = strings.TrimPrefix(nickRequest, "NICK:")
-		nickname = strings.TrimSpace(nickname)
-	} else {
-		// Если пользователь просто ввел никнейм (без префикса)
-		nickname = strings.TrimSpace(nickRequest)
+	if nickMsg.Type != "nick" {
+		errorMsg := Message{
+			Type:  "error",
+			Error: "Ожидается сообщение с никнеймом",
+		}
+		s.sendJSONMessage(&Client{writer: writer}, errorMsg)
+		return
 	}
 
+	nickname = strings.TrimSpace(nickMsg.Content)
 	if nickname == "" {
-		writer.WriteString("ERROR: Nickname cannot be empty\n")
-		writer.Flush()
+		errorMsg := Message{
+			Type:  "error",
+			Error: "Никнейм не может быть пустым",
+		}
+		s.sendJSONMessage(&Client{writer: writer}, errorMsg)
 		return
 	}
 
 	// Проверяем, не занят ли никнейм
 	if s.isNicknameTaken(nickname) {
-		writer.WriteString("NICK_TAKEN\n")
-		writer.Flush()
+		errorMsg := Message{
+			Type:  "error",
+			Error: "Никнейм уже занят",
+		}
+		s.sendJSONMessage(&Client{writer: writer}, errorMsg)
 		return
 	}
 
@@ -267,9 +332,9 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 	// Добавляем клиента в список
 	s.addClient(client)
 
-	// Отправляем подтверждение ПЕРВЫМ
-	writer.WriteString("NICK_OK\n")
-	writer.Flush()
+	// Отправляем подтверждение
+	successMsg := Message{Type: "nick_ok"}
+	s.sendJSONMessage(client, successMsg)
 
 	// ТОЛЬКО ПОСЛЕ успешной аутентификации доставляем отложенные сообщения
 	s.deliverOfflineMessages(client)
@@ -282,15 +347,19 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 		joinMessage = fmt.Sprintf("🟢 %s вернулся в чат", nickname)
 	}
 
-	s.broadcastMessage(joinMessage, client)
+	s.broadcastJSONMessage(Message{
+		Type:      "system",
+		Content:   joinMessage,
+		Timestamp: time.Now().Format("15:04:05"),
+	}, client)
 	fmt.Printf("✅ %s (%s) присоединился к чату\n", nickname, address)
 
 	// Отправляем список пользователей новому клиенту
-	s.sendUserList(client)
+	s.sendUserListJSON(client)
 
 	// Обработка сообщений от клиента
 	for s.running {
-		message, err := reader.ReadString('\n')
+		msg, err := s.readJSONMessage(reader)
 		if err != nil {
 			if s.running {
 				fmt.Printf("❌ Ошибка чтения сообщения от %s: %v\n", nickname, err)
@@ -298,193 +367,254 @@ func (s *ChatServer) handleClient(conn net.Conn, address string) {
 			break
 		}
 
-		message = strings.TrimSpace(message)
-		if message == "" {
-			continue
-		}
+		s.handleClientMessage(client, msg)
+	}
+}
 
-		// Обработка личных сообщений через @ник
-		if strings.HasPrefix(message, "@") {
-			parts := strings.SplitN(message, " ", 2)
-			if len(parts) >= 2 {
-				targetNick := strings.TrimPrefix(parts[0], "@")
-				privateMsg := parts[1]
+func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
+	switch msg.Type {
+	case "message":
+		// Обычное сообщение в чат
+		s.broadcastJSONMessage(Message{
+			Type:      "chat",
+			Content:   msg.Content,
+			From:      client.nickname,
+			Timestamp: time.Now().Format("15:04:05"),
+			Flags:     msg.Flags,
+		}, client)
 
-				if targetNick != "" && privateMsg != "" {
-					// Проверяем, онлайн ли целевой пользователь
-					targetClient := s.findClientByNickname(targetNick)
-
-					if targetClient != nil && targetClient != client {
-						// Пользователь онлайн - отправляем сразу
-						// Проверяем блокировку
-						if targetClient.blocked[client.nickname] {
-							s.sendToClient(client, fmt.Sprintf("❌ Пользователь %s заблокировал вас", targetNick))
-							continue
-						}
-
-						timestamp := time.Now().Format("15:04:05")
-						privateMessage := fmt.Sprintf("[ЛС][%s] %s: %s", timestamp, client.nickname, privateMsg)
-						confirmation := fmt.Sprintf("[ЛС][%s] Вы → %s: %s", timestamp, targetNick, privateMsg)
-
-						s.sendToClient(targetClient, privateMessage)
-						s.sendToClient(client, confirmation)
-						fmt.Printf("💌 ЛС от %s к %s: %s\n", client.nickname, targetNick, privateMsg)
-					} else {
-						// Пользователь оффлайн - сохраняем как отложенное сообщение
-						if targetNick == client.nickname {
-							s.sendToClient(client, "❌ Нельзя отправить сообщение самому себе")
-							continue
-						}
-
-						// Добавляем отложенное сообщение
-						success := s.addOfflineMessage(targetNick, client.nickname, privateMsg)
-
-						if success {
-							timestamp := time.Now().Format("15:04:05")
-							s.sendToClient(client, fmt.Sprintf("📮 [%s] Сообщение для %s сохранено (пользователь оффлайн)", timestamp, targetNick))
-							fmt.Printf("📮 %s оставил сообщение для %s (оффлайн): %s\n", client.nickname, targetNick, privateMsg)
-						} else {
-							s.sendToClient(client, fmt.Sprintf("❌ Почтовый ящик %s переполнен (максимум 10 сообщений)", targetNick))
-						}
-					}
-					continue
-				}
-			} else {
-				s.sendToClient(client, "❌ Использование: @никнейм сообщение")
-				continue
+	case "private":
+		// Личное сообщение
+		targetClient := s.findClientByNickname(msg.To)
+		if targetClient != nil && targetClient != client {
+			// Проверяем блокировку
+			if targetClient.blocked[client.nickname] {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: fmt.Sprintf("Пользователь %s заблокировал вас", msg.To),
+				})
+				return
 			}
-		}
 
-		// Обработка команды #mailbox
-		if message == "#mailbox" {
-			s.getMailboxStatus(client)
-			continue
-		}
+			timestamp := time.Now().Format("15:04:05")
+			// Отправляем получателю
+			s.sendJSONMessage(targetClient, Message{
+				Type:      "private",
+				Content:   msg.Content,
+				From:      client.nickname,
+				To:        msg.To,
+				Timestamp: timestamp,
+				Flags:     map[string]bool{"private": true},
+			})
+			// Отправляем подтверждение отправителю
+			s.sendJSONMessage(client, Message{
+				Type:      "private_sent",
+				Content:   msg.Content,
+				From:      client.nickname,
+				To:        msg.To,
+				Timestamp: timestamp,
+				Flags:     map[string]bool{"private": true},
+			})
+			fmt.Printf("💌 ЛС от %s к %s: %s\n", client.nickname, msg.To, msg.Content)
+		} else {
+			// Пользователь оффлайн - сохраняем как отложенное сообщение
+			if msg.To == client.nickname {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: "Нельзя отправить сообщение самому себе",
+				})
+				return
+			}
 
-		if strings.HasPrefix(message, "#") {
-			parts := strings.SplitN(message, " ", 2)
-			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "#"))
-
-			switch cmd {
-			case "help":
-				s.sendHelp(client)
-				continue
-			case "users":
-				s.sendUserList(client)
-				continue
-			case "all":
-				if len(parts) < 2 {
-					s.sendToClient(client, "❌ Использование: #all сообщение")
-					continue
-				}
-				msg := parts[1]
+			success := s.addOfflineMessage(msg.To, client.nickname, msg.Content)
+			if success {
 				timestamp := time.Now().Format("15:04:05")
-				privateMessage := fmt.Sprintf("[МЛС][%s] %s: %s", timestamp, nickname, msg)
-				s.broadcastPrivateMessage(privateMessage, client)
-				s.sendToClient(client, fmt.Sprintf("[МЛС][%s] Вы: %s", timestamp, msg))
-				continue
-			case "block":
-				if len(parts) < 2 {
-					s.sendToClient(client, "❌ Использование: #block ник")
-					continue
-				}
-				target := parts[1]
-				client.blocked[target] = true
-				s.sendToClient(client, fmt.Sprintf("🚫 %s добавлен в чёрный список", target))
-				continue
-			case "unblock":
-				if len(parts) < 2 {
-					s.sendToClient(client, "❌ Использование: #unblock ник")
-					continue
-				}
-				target := parts[1]
-				delete(client.blocked, target)
-				s.sendToClient(client, fmt.Sprintf("✅ %s убран из чёрного списка", target))
-				continue
-			case "fav":
-				if len(parts) < 2 {
-					// Отправляем список в сыром виде
-					if len(client.favoriteUsers) == 0 {
-						s.sendToClient(client, "FAV_LIST:")
-					} else {
-						var favList []string
-						for user := range client.favoriteUsers {
-							favList = append(favList, user)
-						}
-						s.sendToClient(client, "FAV_LIST:"+strings.Join(favList, ","))
-					}
-					continue
-				}
+				s.sendJSONMessage(client, Message{
+					Type:      "offline_saved",
+					Content:   fmt.Sprintf("Сообщение для %s сохранено (пользователь оффлайн)", msg.To),
+					Timestamp: timestamp,
+				})
+				fmt.Printf("📮 %s оставил сообщение для %s (оффлайн): %s\n", client.nickname, msg.To, msg.Content)
+			} else {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: fmt.Sprintf("Почтовый ящик %s переполнен (максимум 10 сообщений)", msg.To),
+				})
+			}
+		}
 
-				target := parts[1]
+	case "command":
+		s.handleCommand(client, msg)
 
-				if strings.ToLower(target) == "clear" || target == "" {
-					client.favoriteUsers = make(map[string]bool)
-					s.sendToClient(client, "FAV_CLEARED")
-				} else if strings.ToLower(target) == "list" {
-					if len(client.favoriteUsers) == 0 {
-						s.sendToClient(client, "FAV_LIST:")
-					} else {
-						var favList []string
-						for user := range client.favoriteUsers {
-							favList = append(favList, user)
-						}
-						s.sendToClient(client, "FAV_LIST:"+strings.Join(favList, ","))
-					}
-				} else if target == client.nickname {
-					s.sendToClient(client, "FAV_ERROR:Нельзя добавить себя в любимые писатели")
-				} else if s.isNicknameTaken(target) {
-					if client.favoriteUsers[target] {
-						delete(client.favoriteUsers, target)
-						s.sendToClient(client, "FAV_REMOVED:"+target)
-					} else {
-						client.favoriteUsers[target] = true
-						s.sendToClient(client, "FAV_ADDED:"+target)
-					}
+	default:
+		s.sendJSONMessage(client, Message{
+			Type:  "error",
+			Error: "Неизвестный тип сообщения",
+		})
+	}
+}
+
+func (s *ChatServer) handleCommand(client *Client, msg *Message) {
+	cmd := msg.Data["command"]
+
+	switch cmd {
+	case "help":
+		s.sendHelpJSON(client)
+	case "users":
+		s.sendUserListJSON(client)
+	case "mailbox":
+		s.getMailboxStatusJSON(client)
+	case "all":
+		content := msg.Data["content"]
+		if content == "" {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Использование: #all сообщение",
+			})
+			return
+		}
+		timestamp := time.Now().Format("15:04:05")
+		s.broadcastJSONMessage(Message{
+			Type:      "mass_private",
+			Content:   content,
+			From:      client.nickname,
+			Timestamp: timestamp,
+			Flags:     map[string]bool{"mass_private": true},
+		}, client)
+		s.sendJSONMessage(client, Message{
+			Type:      "mass_private_sent",
+			Content:   content,
+			From:      client.nickname,
+			Timestamp: timestamp,
+			Flags:     map[string]bool{"mass_private": true},
+		})
+
+	case "block":
+		target := msg.Data["target"]
+		if target == "" {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Использование: #block ник",
+			})
+			return
+		}
+		client.blocked[target] = true
+		s.sendJSONMessage(client, Message{
+			Type:    "blocked",
+			Content: fmt.Sprintf("%s добавлен в чёрный список", target),
+		})
+
+	case "unblock":
+		target := msg.Data["target"]
+		if target == "" {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Использование: #unblock ник",
+			})
+			return
+		}
+		delete(client.blocked, target)
+		s.sendJSONMessage(client, Message{
+			Type:    "unblocked",
+			Content: fmt.Sprintf("%s убран из чёрного списка", target),
+		})
+
+	case "fav":
+		action := msg.Data["action"]
+		target := msg.Data["target"]
+
+		switch action {
+		case "list":
+			if len(client.favoriteUsers) == 0 {
+				s.sendJSONMessage(client, Message{
+					Type:    "fav_list",
+					Users:   []string{},
+					Content: "Ваш список любимых писателей пуст",
+				})
+			} else {
+				var favList []string
+				for user := range client.favoriteUsers {
+					favList = append(favList, user)
+				}
+				s.sendJSONMessage(client, Message{
+					Type:    "fav_list",
+					Users:   favList,
+					Content: fmt.Sprintf("Ваши любимые писатели (%d): %s", len(favList), strings.Join(favList, ", ")),
+				})
+			}
+		case "clear":
+			client.favoriteUsers = make(map[string]bool)
+			s.sendJSONMessage(client, Message{
+				Type:    "fav_cleared",
+				Content: "Список любимых писателей очищен",
+			})
+		case "add", "remove":
+			if target == "" {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: "Укажите никнейм пользователя",
+				})
+				return
+			}
+
+			if target == client.nickname {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: "Нельзя добавить себя в любимые писатели",
+				})
+				return
+			}
+
+			if !s.isNicknameTaken(target) {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: fmt.Sprintf("Пользователь %s не найден", target),
+				})
+				return
+			}
+
+			if action == "add" {
+				if client.favoriteUsers[target] {
+					s.sendJSONMessage(client, Message{
+						Type:  "error",
+						Error: fmt.Sprintf("%s уже в списке любимых писателей", target),
+					})
 				} else {
-					s.sendToClient(client, "FAV_ERROR:Пользователь "+target+" не найден")
+					client.favoriteUsers[target] = true
+					s.sendJSONMessage(client, Message{
+						Type:    "fav_added",
+						Content: fmt.Sprintf("%s добавлен в список любимых писателей", target),
+						Data:    map[string]string{"user": target},
+					})
 				}
-				continue
-
+			} else { // remove
+				if !client.favoriteUsers[target] {
+					s.sendJSONMessage(client, Message{
+						Type:  "error",
+						Error: fmt.Sprintf("%s не в списке любимых писателей", target),
+					})
+				} else {
+					delete(client.favoriteUsers, target)
+					s.sendJSONMessage(client, Message{
+						Type:    "fav_removed",
+						Content: fmt.Sprintf("%s удален из списка любимых писателей", target),
+						Data:    map[string]string{"user": target},
+					})
+				}
 			}
+		default:
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Неизвестная команда fav",
+			})
 		}
 
+	default:
+		s.sendJSONMessage(client, Message{
+			Type:  "error",
+			Error: "Неизвестная команда",
+		})
 	}
-}
-
-func (s *ChatServer) broadcastPrivateMessage(message string, sender *Client) {
-	s.mutex.Lock()
-	clients := make([]*Client, len(s.clients))
-	copy(clients, s.clients)
-	s.mutex.Unlock()
-
-	for _, client := range clients {
-		if client == sender {
-			continue
-		}
-		// Проверяем, не заблокирован ли отправитель получателем
-		if client.blocked[sender.nickname] {
-			continue // Пропускаем заблокированных
-		}
-		s.sendToClient(client, message)
-	}
-}
-
-func (s *ChatServer) sendPrivateMessage(targetNickname, message string, sender *Client) bool {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	for _, client := range s.clients {
-		if client.nickname == targetNickname && client != sender {
-			// Проверяем, не заблокирован ли отправитель получателем
-			if client.blocked[sender.nickname] {
-				return false // Получатель заблокировал отправителя
-			}
-			s.sendToClient(client, message)
-			return true
-		}
-	}
-	return false
 }
 
 func (s *ChatServer) sendToClient(client *Client, message string) {
@@ -492,20 +622,69 @@ func (s *ChatServer) sendToClient(client *Client, message string) {
 	client.writer.Flush()
 }
 
-func (s *ChatServer) sendHelp(client *Client) {
-	helpMessage := "HELP:" +
-		"@ник сообщение - личное сообщение | " +
-		"#all сообщение - массовое личное сообщение | " +
-		"#users - список пользователей | " +
-		"#help - эта справка | " +
-		"#mailbox - проверить почтовый ящик | " +
-		"#fav [ник] - добавить/удалить любимого писателя | " +
-		"#fav list - показать список | " +
-		"#fav clear - очистить список | " +
-		"#block ник - добавить в чёрный список | " +
-		"#unblock ник - убрать из чёрного списка | " +
-		"/quit - выход из чата"
-	s.sendToClient(client, helpMessage)
+func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
+	s.mutex.Lock()
+	clients := make([]*Client, len(s.clients))
+	copy(clients, s.clients)
+	s.mutex.Unlock()
+
+	var disconnected []*Client
+
+	for _, client := range clients {
+		if exclude != nil && client == exclude {
+			continue
+		}
+
+		// Проверяем блокировку для личных сообщений
+		if msg.Type == "private" && client.blocked[msg.From] {
+			continue
+		}
+
+		// Создаем копию сообщения для каждого клиента
+		clientMsg := msg
+
+		// Добавляем флаг "favorite" если отправитель в списке любимых получателя
+		if msg.Type == "chat" && client.favoriteUsers[msg.From] {
+			if clientMsg.Flags == nil {
+				clientMsg.Flags = make(map[string]bool)
+			}
+			clientMsg.Flags["favorite"] = true
+		}
+
+		err := s.sendJSONMessage(client, clientMsg)
+		if err != nil {
+			fmt.Printf("❌ Ошибка отправки сообщения %s: %v\n", client.nickname, err)
+			disconnected = append(disconnected, client)
+		}
+	}
+
+	// Удаляем отключившихся клиентов
+	for _, client := range disconnected {
+		s.removeClient(client)
+		fmt.Printf("🔴 %s отключился (потеряна связь)\n", client.nickname)
+		client.conn.Close()
+	}
+}
+
+func (s *ChatServer) sendHelpJSON(client *Client) {
+	helpData := map[string]string{
+		"@ник сообщение": "личное сообщение",
+		"#all сообщение": "массовое личное сообщение",
+		"#users":         "список пользователей",
+		"#help":          "эта справка",
+		"#mailbox":       "проверить почтовый ящик",
+		"#fav [ник]":     "добавить/удалить любимого писателя",
+		"#fav list":      "показать список",
+		"#fav clear":     "очистить список",
+		"#block ник":     "добавить в чёрный список",
+		"#unblock ник":   "убрать из чёрного списка",
+		"/quit":          "выход из чата",
+	}
+
+	s.sendJSONMessage(client, Message{
+		Type: "help",
+		Data: helpData,
+	})
 }
 func (s *ChatServer) isNicknameTaken(nickname string) bool {
 	s.mutex.Lock()
@@ -537,50 +716,19 @@ func (s *ChatServer) removeClient(client *Client) {
 	}
 }
 
-func (s *ChatServer) broadcastMessage(message string, exclude *Client) {
-	s.mutex.Lock()
-	clients := make([]*Client, len(s.clients))
-	copy(clients, s.clients)
-	s.mutex.Unlock()
-
-	var disconnected []*Client
-
-	for _, client := range clients {
-		if exclude != nil && client == exclude {
-			continue
-		}
-
-		_, err := client.writer.WriteString(message + "\n")
-		if err != nil {
-			fmt.Printf("❌ Ошибка отправки сообщения %s: %v\n", client.nickname, err)
-			disconnected = append(disconnected, client)
-		} else {
-			client.writer.Flush()
-		}
-	}
-
-	// Удаляем отключившихся клиентов
-	for _, client := range disconnected {
-		s.removeClient(client)
-		fmt.Printf("🔴 %s отключился (потеряна связь)\n", client.nickname)
-		client.conn.Close()
-	}
-}
-
-func (s *ChatServer) sendUserList(client *Client) {
+func (s *ChatServer) sendUserListJSON(client *Client) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	var userList strings.Builder
-	userList.WriteString("USERS:")
-	for i, c := range s.clients {
-		if i > 0 {
-			userList.WriteString(",")
-		}
-		userList.WriteString(c.nickname)
+	var users []string
+	for _, c := range s.clients {
+		users = append(users, c.nickname)
 	}
 
-	s.sendToClient(client, userList.String())
+	s.sendJSONMessage(client, Message{
+		Type:  "users",
+		Users: users,
+	})
 }
 
 func (s *ChatServer) disconnectClient(client *Client) {
@@ -589,7 +737,11 @@ func (s *ChatServer) disconnectClient(client *Client) {
 
 	if client.nickname != "" {
 		leaveMessage := fmt.Sprintf("🔴 %s покинул чат", client.nickname)
-		s.broadcastMessage(leaveMessage, nil)
+		s.broadcastJSONMessage(Message{
+			Type:      "system",
+			Content:   leaveMessage,
+			Timestamp: time.Now().Format("15:04:05"),
+		}, nil)
 		fmt.Printf("👋 %s отключился\n", client.nickname)
 	}
 }
