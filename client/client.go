@@ -380,10 +380,10 @@ func (c *ChatClient) printChatMessage(msg *Message) {
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
-		fmt.Printf("\n\033[1;33m✨ [%s] %s: %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, msg.Content)
 	} else {
 		// Обычное сообщение
-		fmt.Printf("\n[%s] %s: %s\n> ", msg.Timestamp, msg.From, msg.Content)
+		fmt.Printf("\n%s: %s\n> ", msg.From, msg.Content)
 	}
 }
 
@@ -391,30 +391,30 @@ func (c *ChatClient) printPrivateMessage(msg *Message) {
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
-		fmt.Printf("\n\033[1;33m✨ [ЛС][%s] %s: %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, msg.Content)
 	} else {
 		// Обычное личное сообщение
-		fmt.Printf("\n\033[36m[ЛС][%s] %s: %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+		fmt.Printf("\n\033[36m%s: %s\033[0m\n> ", msg.From, msg.Content)
 	}
 }
 
 func (c *ChatClient) printPrivateSentMessage(msg *Message) {
-	fmt.Printf("\n\033[36m[ЛС][%s] Вы → %s: %s\033[0m\n> ", msg.Timestamp, msg.To, msg.Content)
+	fmt.Printf("\n\033[36mВы → %s: %s\033[0m\n> ", msg.To, msg.Content)
 }
 
 func (c *ChatClient) printMassPrivateMessage(msg *Message) {
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
-		fmt.Printf("\n\033[1;33m✨ [МЛС][%s] %s: %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, msg.Content)
 	} else {
 		// Обычное массовое сообщение
-		fmt.Printf("\n\033[35m[МЛС][%s] %s: %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+		fmt.Printf("\n\033[35m%s: %s\033[0m\n> ", msg.From, msg.Content)
 	}
 }
 
 func (c *ChatClient) printMassPrivateSentMessage(msg *Message) {
-	fmt.Printf("\n\033[35m[МЛС][%s] Вы: %s\033[0m\n> ", msg.Timestamp, msg.Content)
+	fmt.Printf("\n\033[35mВы: %s\033[0m\n> ", msg.Content)
 }
 
 func (c *ChatClient) printSystemMessage(msg *Message) {
@@ -426,7 +426,7 @@ func (c *ChatClient) printMailboxStatus(msg *Message) {
 }
 
 func (c *ChatClient) printOfflineMessage(msg *Message) {
-	fmt.Printf("\n\033[33m[📮][%s] %s (оффлайн): %s\033[0m\n> ", msg.Timestamp, msg.From, msg.Content)
+	fmt.Printf("\n\033[33m[📮] %s (оффлайн): %s\033[0m\n> ", msg.From, msg.Content)
 }
 
 func (c *ChatClient) printOfflineDelivered(msg *Message) {
