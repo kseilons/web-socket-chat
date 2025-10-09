@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -40,6 +41,7 @@ type Client struct {
 	blocked         map[string]bool
 	favoriteUsers   map[string]bool
 	showWordLengths bool
+	color         string // Hex color for user messages
 }
 
 type MailboxMessage struct {
@@ -95,6 +97,16 @@ func NewChatServer(host string, port int) *ChatServer {
 	}
 }
 
+// generateRandomColor generates a random hex color
+func generateRandomColor() string {
+	rand.Seed(time.Now().UnixNano())
+	return fmt.Sprintf("#%06X", rand.Intn(0xFFFFFF))
+}
+
+// isValidHexColor validates if a string is a valid 6-character hex color
+func isValidHexColor(color string) bool {
+	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
+	return matched
 func (s *ChatServer) logToFile(message string) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logMessage := fmt.Sprintf("[%s] %s\n", timestamp, message)
@@ -576,6 +588,11 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				privateMsg.Flags["favorite"] = true
 			}
 
+			// Добавляем цвет отправителя
+			if client.color != "" {
+				privateMsg.Data = map[string]string{"color": client.color}
+			}
+
 			s.sendJSONMessage(targetClient, privateMsg)
 			// Отправляем подтверждение отправителю
 			s.sendJSONMessage(client, Message{
@@ -827,6 +844,33 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 	case "log":
 		s.sendLogFile(client)
 
+	case "color":
+		target := msg.Data["target"]
+		if target == "" {
+			// Random color
+			client.color = generateRandomColor()
+			s.sendJSONMessage(client, Message{
+				Type:    "color_set",
+				Content: fmt.Sprintf("Цвет текста сообщений установлен: %s", client.color),
+				Data:    map[string]string{"color": client.color},
+			})
+		} else {
+			// Validate hex color
+			if !isValidHexColor(target) {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: "Неверный формат цвета. Используйте #RRGGBB (например, #FF0000)",
+				})
+				return
+			}
+			client.color = strings.ToUpper(target)
+			s.sendJSONMessage(client, Message{
+				Type:    "color_set",
+				Content: fmt.Sprintf("Цвет текста сообщений установлен: %s", client.color),
+				Data:    map[string]string{"color": client.color},
+			})
+		}
+
 	default:
 		s.sendJSONMessage(client, Message{
 			Type:  "error",
@@ -887,6 +931,14 @@ func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 			clientMsg.Flags["favorite"] = true
 		}
 
+		// Добавляем цвет отправителя в Data
+		if sender := s.findClientByNickname(msg.From); sender != nil && sender.color != "" {
+			if clientMsg.Data == nil {
+				clientMsg.Data = make(map[string]string)
+			}
+			clientMsg.Data["color"] = sender.color
+		}
+
 		err := s.sendJSONMessage(client, clientMsg)
 		if err != nil {
 			fmt.Printf("❌ Ошибка отправки сообщения %s: %v\n", client.nickname, err)
@@ -914,6 +966,8 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#fav clear":     "очистить список",
 		"#block ник":     "добавить в чёрный список",
 		"#unblock ник":   "убрать из чёрного списка",
+		"#color":         "установить случайный цвет текста сообщений",
+		"#color #hex":    "установить цвет текста сообщений (например, #FF0000)",
 		"#log":           "получить содержимое лог-файла",
 		"#wordlengths":   "переключить режим показа длин слов",
 		"/quit":          "выход из чата",
