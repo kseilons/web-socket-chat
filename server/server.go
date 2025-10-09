@@ -536,15 +536,6 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				Timestamp: timestamp,
 				Flags:     map[string]bool{"private": true},
 			})
-			// Сохраняем последнее сообщение отправителя (личное)
-			s.setLastMessage(client.nickname, Message{
-				Type:      "private",
-				Content:   msg.Content,
-				From:      client.nickname,
-				To:        msg.To,
-				Timestamp: timestamp,
-				Flags:     map[string]bool{"private": true},
-			})
 			fmt.Printf("💌 ЛС от %s к %s: %s\n", client.nickname, msg.To, msg.Content)
 		} else {
 			// Пользователь оффлайн - сохраняем как отложенное сообщение
@@ -562,14 +553,6 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				s.sendJSONMessage(client, Message{
 					Type:      "offline_saved",
 					Content:   fmt.Sprintf("Сообщение для %s сохранено (пользователь оффлайн)", msg.To),
-					Timestamp: timestamp,
-				})
-				// Сохраняем последнее сообщение отправителя (сохранено оффлайн)
-				s.setLastMessage(client.nickname, Message{
-					Type:      "offline_saved",
-					Content:   msg.Content,
-					From:      client.nickname,
-					To:        msg.To,
 					Timestamp: timestamp,
 				})
 				fmt.Printf("📮 %s оставил сообщение для %s (оффлайн): %s\n", client.nickname, msg.To, msg.Content)
