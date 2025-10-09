@@ -170,9 +170,11 @@ func (c *ChatClient) Start() {
 	fmt.Println("  #all сообщение - массовое личное сообщение")
 	fmt.Println("  @ник сообщение - приватное сообщение")
 	fmt.Println("  #mailbox - проверить почтовый ящик")
+	fmt.Println("  #last <ник> - показать последнее сообщение пользователя")
 	fmt.Println("  #block ник - добавить в чёрный список")
 	fmt.Println("  #unblock ник - убрать из чёрного списка")
 	fmt.Println("  #log - показать содержимое лог-файла сервера")
+	fmt.Println("  #wordlengths - переключить режим показа длин слов")
 	fmt.Println("  /quit - выход из чата")
 	fmt.Println(strings.Repeat("=", 50))
 
@@ -230,8 +232,14 @@ func (c *ChatClient) handleCommand(message string) {
 	msg.Data["command"] = cmd
 
 	switch cmd {
-	case "help", "users", "mailbox":
+	case "help", "users", "mailbox", "wordlengths":
 		// Простые команды без параметров
+	case "last":
+		if len(parts) < 2 {
+			fmt.Println("❌ Использование: #last <ник>")
+			return
+		}
+		msg.Data["target"] = parts[1]
 	case "all":
 		if len(parts) < 2 {
 			fmt.Println("❌ Использование: #all сообщение")
@@ -354,6 +362,13 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 	case "mailbox_status":
 		// Статус почтового ящика
 		c.printMailboxStatus(msg)
+	case "last_result":
+		// Результат команды #last
+		if msg.From != "" {
+			fmt.Printf("\nПоследнее от %s (%s): %s\n> ", msg.From, msg.Timestamp, msg.Content)
+		} else {
+			fmt.Printf("\n%s\n> ", msg.Content)
+		}
 	case "offline_message":
 		// Отложенное сообщение
 		c.printOfflineMessage(msg)
@@ -386,6 +401,9 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 		fmt.Println(strings.Repeat("─", 60))
 		fmt.Println(msg.Content)
 		fmt.Println(strings.Repeat("─", 60))
+	case "wordlengths_toggle":
+		// Переключение режима показа длин слов
+		c.printWordLengthsToggle(msg)
 	case "error":
 		// Ошибка
 		c.printError(msg)
@@ -474,6 +492,10 @@ func (c *ChatClient) printBlocked(msg *Message) {
 
 func (c *ChatClient) printUnblocked(msg *Message) {
 	fmt.Printf("\n✅ %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printWordLengthsToggle(msg *Message) {
+	fmt.Printf("\n🔢 %s\n> ", msg.Content)
 }
 
 func (c *ChatClient) printError(msg *Message) {
