@@ -190,7 +190,6 @@ func (s *ChatServer) Start() error {
 	// Настраиваем HTTP маршруты
 	http.HandleFunc("/ws", s.handleWebSocket)
 	http.HandleFunc("/", s.handleHome)
-	http.HandleFunc("/send-multi", s.handleSendMulti)
 
 	startMessage := fmt.Sprintf("🚀 WebSocket чат-сервер запущен на %s\nWebSocket endpoint: ws://%s/ws\nОжидание подключений...", address, address)
 	fmt.Println(startMessage)
