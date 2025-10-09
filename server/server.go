@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 )
@@ -42,6 +43,7 @@ type Client struct {
 	favoriteUsers   map[string]bool
 	showWordLengths bool
 	showUppercase   bool
+	showZabor       bool // Новое поле для режима "забор"
 	color           string // Hex color for user messages
 }
 
@@ -111,6 +113,27 @@ func generateRandomColor() string {
 func isValidHexColor(color string) bool {
 	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
 	return matched
+}
+
+// toZabor converts text to "забор" style: PrIvEt, ХеЛлО, etc.
+func toZabor(text string) string {
+	var result strings.Builder
+	upper := true // начинаем с заглавной
+
+	for _, r := range text {
+		if unicode.IsLetter(r) {
+			if upper {
+				result.WriteRune(unicode.ToUpper(r))
+			} else {
+				result.WriteRune(unicode.ToLower(r))
+			}
+			upper = !upper
+		} else {
+			// Не буквы (пробелы, знаки) не влияют на чередование
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
 }
 
 func (s *ChatServer) logToFile(message string) {
@@ -240,6 +263,7 @@ func (s *ChatServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		blocked:         make(map[string]bool),
 		favoriteUsers:   make(map[string]bool),
 		showWordLengths: false,
+		showZabor:       false, // Инициализация нового поля
 	}
 
 	// Добавляем клиента в список
@@ -646,10 +670,12 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 		fmt.Println(chatMessage)
 		s.logToFile(chatMessage)
 		// Обычное сообщение в чат
-		// Учитываем режим капса у отправителя
+		// Учитываем режимы отправителя
 		content := msg.Content
 		if client.showUppercase {
 			content = strings.ToUpper(content)
+		} else if client.showZabor {
+			content = toZabor(content)
 		}
 		// Сохраняем как последнее сообщение отправителя
 		s.setLastMessage(client.nickname, Message{
@@ -728,10 +754,12 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				}
 
 				timestamp := time.Now().Format("15:04:05")
-				// Отправляем получателю (учитываем капс у отправителя)
+				// Отправляем получателю (учитываем режимы отправителя)
 				pcontent := msg.Content
 				if client.showUppercase {
 					pcontent = strings.ToUpper(pcontent)
+				} else if client.showZabor {
+					pcontent = toZabor(pcontent)
 				}
 				privateMsg := Message{
 					Type:      "private",
@@ -766,10 +794,12 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				fmt.Println(privateMessage)
 				s.logToFile(privateMessage)
 			} else {
-				// Пользователь оффлайн - сохраняем как отложенное сообщение (учитывая капс)
+				// Пользователь оффлайн - сохраняем как отложенное сообщение (учитывая режимы)
 				offContent := msg.Content
 				if client.showUppercase {
 					offContent = strings.ToUpper(offContent)
+				} else if client.showZabor {
+					offContent = toZabor(offContent)
 				}
 				// Пользователь оффлайн - сохраняем как отложенное сообщение
 				success := s.addOfflineMessage(target, client.nickname, offContent)
@@ -827,10 +857,12 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 		s.updateLastWriter(client.nickname)
 
 		timestamp := time.Now().Format("15:04:05")
-		// Учитываем режим капса у отправителя
+		// Учитываем режимы отправителя
 		bcontent := content
 		if client.showUppercase {
 			bcontent = strings.ToUpper(bcontent)
+		} else if client.showZabor {
+			bcontent = toZabor(bcontent)
 		}
 		// Сохраняем последнее массовое сообщение отправителя
 		s.setLastMessage(client.nickname, Message{
@@ -1019,6 +1051,18 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			Type:    "upper_toggle",
 			Content: fmt.Sprintf("Режим капса %s", status),
 		})
+
+	case "userzabor": // Новая команда
+		client.showZabor = !client.showZabor
+		status := "выключен"
+		if client.showZabor {
+			status = "включен"
+		}
+		s.sendJSONMessage(client, Message{
+			Type:    "zabor_toggle",
+			Content: fmt.Sprintf("Режим 'забор' %s", status),
+		})
+
 	case "log":
 		s.sendLogFile(client)
 
@@ -1052,6 +1096,7 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			Type:    "info",
 			Content: fmt.Sprintf("Пользователь %s кикнут", targetNick),
 		})
+
 	case "color":
 		target := msg.Data["target"]
 		if target == "" {
@@ -1233,8 +1278,9 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#color #hex":         "установить цвет текста сообщений (например, #FF0000)",
 		"#log":                "получить содержимое лог-файла",
 		"#wordlengths":        "переключить режим показа длин слов",
-		"#kick ник [причина]": "кикнуть пользователя с указанием причины",
 		"#upper":              "отображать ваши сообщения в верхнем регистре",
+		"#UserZabor":          "переключить режим 'забор' (чеРеДоВаНиЕ заглавных и строчных букв)",
+		"#kick ник [причина]": "кикнуть пользователя с указанием причины",
 		"/quit":               "выход из чата",
 	}
 
@@ -1243,6 +1289,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		Data: helpData,
 	})
 }
+
 func (s *ChatServer) isNicknameTaken(nickname string) bool {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
