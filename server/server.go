@@ -910,6 +910,36 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 	case "log":
 		s.sendLogFile(client)
 
+	case "kick":
+		targetNick := strings.TrimSpace(msg.Data["target"])
+		reason := strings.TrimSpace(msg.Data["reason"]) // optional
+		if targetNick == "" {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Использование: #kick <ник> [причина]",
+			})
+			return
+		}
+		if targetNick == client.nickname {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Нельзя кикнуть себя",
+			})
+			return
+		}
+		target := s.findClientByNickname(targetNick)
+		if target == nil {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: fmt.Sprintf("Пользователь %s не найден", targetNick),
+			})
+			return
+		}
+		s.kickClient(target, client.nickname, reason)
+		s.sendJSONMessage(client, Message{
+			Type:    "info",
+			Content: fmt.Sprintf("Пользователь %s кикнут", targetNick),
+		})
 	case "color":
 		target := msg.Data["target"]
 		if target == "" {
@@ -943,6 +973,39 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			Error: "Неизвестная команда",
 		})
 	}
+}
+
+// kickClient принудительно отключает пользователя с уведомлением и логированием
+func (s *ChatServer) kickClient(target *Client, by string, reason string) {
+    if target == nil {
+        return
+    }
+    if reason == "" {
+        reason = "без причины"
+    }
+
+    timestamp := time.Now().Format("15:04:05")
+
+    // Уведомляем целевого пользователя
+    s.sendJSONMessage(target, Message{
+        Type:      "system",
+        Content:   fmt.Sprintf("Вас кикнул %s: %s", by, reason),
+        Timestamp: timestamp,
+        Flags:     map[string]bool{"kicked": true},
+    })
+
+    // Логируем и уведомляем остальных
+    info := fmt.Sprintf("⛔ %s кикнул %s: %s", by, target.nickname, reason)
+    fmt.Println(info)
+    s.logToFile(info)
+    s.broadcastJSONMessage(Message{
+        Type:      "system",
+        Content:   fmt.Sprintf("⛔ %s был кикнут (%s)", target.nickname, reason),
+        Timestamp: timestamp,
+    }, target)
+
+    // Отключаем пользователя
+    s.disconnectClient(target)
 }
 
 // sendLastWriterJSON отправляет информацию о последнем писавшем пользователе
@@ -1058,6 +1121,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#color #hex":    "установить цвет текста сообщений (например, #FF0000)",
 		"#log":           "получить содержимое лог-файла",
 		"#wordlengths":   "переключить режим показа длин слов",
+    "#kick ник [причина]": "кикнуть пользователя с указанием причины",
 		"#upper":         "отображать ваши сообщения в верхнем регистре",
 		"/quit":          "выход из чата",
 	}
