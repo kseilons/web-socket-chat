@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -165,21 +164,15 @@ func (c *ChatClient) Start() {
 	fmt.Println("Доступные команды:")
 	fmt.Println("  #help - показать справку")
 	fmt.Println("  #users - список пользователей")
+	fmt.Println("  #ip ник - показать IP пользователя")
 	fmt.Println("  #fav [ник] - добавить/удалить любимого писателя")
 	fmt.Println("  #fav list - показать список любимых")
 	fmt.Println("  #fav clear - очистить список")
 	fmt.Println("  #all сообщение - массовое личное сообщение")
 	fmt.Println("  @ник сообщение - приватное сообщение")
 	fmt.Println("  #mailbox - проверить почтовый ящик")
-	fmt.Println("  #lastwriter - показать последнего писавшего пользователя")
-	fmt.Println("  #last <ник> - показать последнее сообщение пользователя")
 	fmt.Println("  #block ник - добавить в чёрный список")
 	fmt.Println("  #unblock ник - убрать из чёрного списка")
-	fmt.Println("  #upper - отображать ваши сообщения в верхнем регистре")
-	fmt.Println("  #color - установить случайный цвет текста сообщений")
-	fmt.Println("  #color #hex - установить цвет текста сообщений (например, #FF0000)")
-	fmt.Println("  #log - показать содержимое лог-файла сервера")
-	fmt.Println("  #wordlengths - переключить режим показа длин слов")
 	fmt.Println("  /quit - выход из чата")
 	fmt.Println(strings.Repeat("=", 50))
 
@@ -237,14 +230,8 @@ func (c *ChatClient) handleCommand(message string) {
 	msg.Data["command"] = cmd
 
 	switch cmd {
-	case "help", "users", "mailbox", "wordlengths", "upper":
+	case "help", "users", "mailbox":
 		// Простые команды без параметров
-	case "last":
-		if len(parts) < 2 {
-			fmt.Println("❌ Использование: #last <ник>")
-			return
-		}
-		msg.Data["target"] = parts[1]
 	case "all":
 		if len(parts) < 2 {
 			fmt.Println("❌ Использование: #all сообщение")
@@ -257,10 +244,12 @@ func (c *ChatClient) handleCommand(message string) {
 			return
 		}
 		msg.Data["target"] = parts[1]
-	case "color":
-		if len(parts) >= 2 {
-			msg.Data["target"] = parts[1]
+	case "ip":
+		if len(parts) < 2 {
+			fmt.Println("❌ Использование: #ip ник")
+			return
 		}
+		msg.Data["target"] = parts[1]
 	case "fav":
 		if len(parts) < 2 {
 			msg.Data["action"] = "list"
@@ -280,8 +269,6 @@ func (c *ChatClient) handleCommand(message string) {
 				msg.Data["target"] = subParts[1]
 			}
 		}
-	case "log":
-		// Directly send the log command without redundant calls
 	default:
 		fmt.Printf("❌ Неизвестная команда: %s\n", cmd)
 		return
@@ -312,17 +299,6 @@ func (c *ChatClient) handlePrivateMessage(message string) {
 	err := c.sendJSONMessage(msg)
 	if err != nil {
 		fmt.Printf("❌ Ошибка отправки личного сообщения: %v\n", err)
-	}
-}
-
-func (c *ChatClient) requestLog() {
-	msg := Message{
-		Type: "command",
-		Data: map[string]string{"command": "log"},
-	}
-	err := c.conn.WriteJSON(msg)
-	if err != nil {
-		fmt.Printf("❌ Ошибка запроса лог-файла: %v\n", err)
 	}
 }
 
@@ -368,16 +344,11 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 	case "help":
 		// Справка
 		c.handleHelp(msg)
+	case "ip":
+		c.printIP(msg)
 	case "mailbox_status":
 		// Статус почтового ящика
 		c.printMailboxStatus(msg)
-	case "last_result":
-		// Результат команды #last
-		if msg.From != "" {
-			fmt.Printf("\nПоследнее от %s (%s): %s\n> ", msg.From, msg.Timestamp, msg.Content)
-		} else {
-			fmt.Printf("\n%s\n> ", msg.Content)
-		}
 	case "offline_message":
 		// Отложенное сообщение
 		c.printOfflineMessage(msg)
@@ -405,23 +376,6 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 	case "unblocked":
 		// Пользователь разблокирован
 		c.printUnblocked(msg)
-	case "color_set":
-		// Цвет установлен
-		c.printColorSet(msg)
-	case "log":
-		fmt.Println("\n📜 Содержимое лог-файла сервера:")
-		fmt.Println(strings.Repeat("─", 60))
-		fmt.Println(msg.Content)
-		fmt.Println(strings.Repeat("─", 60))
-	case "wordlengths_toggle":
-		// Переключение режима показа длин слов
-		c.printWordLengthsToggle(msg)
-		case "upper_toggle":
-			// Переключение режима капса
-			fmt.Printf("\n🔠 %s\n> ", msg.Content)
-	case "last_writer":
-		// Информация о последнем писавшем пользователе
-		c.printLastWriter(msg)
 	case "error":
 		// Ошибка
 		c.printError(msg)
@@ -432,40 +386,24 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 
 // Функции для обработки различных типов сообщений
 func (c *ChatClient) printChatMessage(msg *Message) {
-	// Получаем цвет отправителя
-	color := ""
-	if msg.Data != nil {
-		color = msg.Data["color"]
-	}
-
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
-		coloredContent := getColoredText(msg.Content, color)
-		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, coloredContent)
+		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, msg.Content)
 	} else {
 		// Обычное сообщение
-		coloredContent := getColoredText(msg.Content, color)
-		fmt.Printf("\n%s: %s\n> ", msg.From, coloredContent)
+		fmt.Printf("\n%s: %s\n> ", msg.From, msg.Content)
 	}
 }
 
 func (c *ChatClient) printPrivateMessage(msg *Message) {
-	// Получаем цвет отправителя
-	color := ""
-	if msg.Data != nil {
-		color = msg.Data["color"]
-	}
-
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
-		coloredContent := getColoredText(msg.Content, color)
-		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, coloredContent)
+		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, msg.Content)
 	} else {
 		// Обычное личное сообщение
-		coloredContent := getColoredText(msg.Content, color)
-		fmt.Printf("\n\033[36m%s: %s\033[0m\n> ", msg.From, coloredContent)
+		fmt.Printf("\n\033[36m%s: %s\033[0m\n> ", msg.From, msg.Content)
 	}
 }
 
@@ -474,21 +412,13 @@ func (c *ChatClient) printPrivateSentMessage(msg *Message) {
 }
 
 func (c *ChatClient) printMassPrivateMessage(msg *Message) {
-	// Получаем цвет отправителя
-	color := ""
-	if msg.Data != nil {
-		color = msg.Data["color"]
-	}
-
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
-		coloredContent := getColoredText(msg.Content, color)
-		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, coloredContent)
+		fmt.Printf("\n\033[1;33m✨ %s: %s\033[0m\n> ", msg.From, msg.Content)
 	} else {
 		// Обычное массовое сообщение
-		coloredContent := getColoredText(msg.Content, color)
-		fmt.Printf("\n\033[35m%s: %s\033[0m\n> ", msg.From, coloredContent)
+		fmt.Printf("\n\033[35m%s: %s\033[0m\n> ", msg.From, msg.Content)
 	}
 }
 
@@ -498,6 +428,27 @@ func (c *ChatClient) printMassPrivateSentMessage(msg *Message) {
 
 func (c *ChatClient) printSystemMessage(msg *Message) {
 	fmt.Printf("\n%s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printIP(msg *Message) {
+	// Приходит с Data{"user":..., "ip":...} и/или Content
+	if msg.Data != nil {
+		user := msg.Data["user"]
+		ip := msg.Data["ip"]
+		family := msg.Data["family"]
+		if user != "" && ip != "" {
+			if family == "IPv4" {
+				fmt.Printf("\n📡 IPv4 %s: %s\n> ", user, ip)
+			} else if family == "IPv6" {
+				fmt.Printf("\n📡 IPv6 %s: %s\n> ", user, ip)
+			} else {
+				fmt.Printf("\n📡 %s: %s\n> ", user, ip)
+			}
+			return
+		}
+	}
+	// Fallback на Content
+	fmt.Printf("\n📡 %s\n> ", msg.Content)
 }
 
 func (c *ChatClient) printMailboxStatus(msg *Message) {
@@ -536,53 +487,8 @@ func (c *ChatClient) printUnblocked(msg *Message) {
 	fmt.Printf("\n✅ %s\n> ", msg.Content)
 }
 
-func (c *ChatClient) printColorSet(msg *Message) {
-	fmt.Printf("\n🎨 %s\n> ", msg.Content)
-}
-
-func (c *ChatClient) printWordLengthsToggle(msg *Message) {
-	fmt.Printf("\n🔢 %s\n> ", msg.Content)
-}
-
-// printLastWriter выводит информацию о последнем писавшем пользователе
-func (c *ChatClient) printLastWriter(msg *Message) {
-	fmt.Printf("\n📝 %s\n> ", msg.Content)
-}
-
 func (c *ChatClient) printError(msg *Message) {
 	fmt.Printf("\n❌ %s\n> ", msg.Error)
-}
-
-// hexToANSI converts a hex color to ANSI color code
-func hexToANSI(hex string) string {
-	if hex == "" || len(hex) != 7 || hex[0] != '#' {
-		return ""
-	}
-
-	// Parse hex values
-	r, err1 := strconv.ParseInt(hex[1:3], 16, 64)
-	g, err2 := strconv.ParseInt(hex[3:5], 16, 64)
-	b, err3 := strconv.ParseInt(hex[5:7], 16, 64)
-
-	if err1 != nil || err2 != nil || err3 != nil {
-		return ""
-	}
-
-	// Convert to ANSI 256 color (approximation)
-	ansi := 16 + (r/51)*36 + (g/51)*6 + (b / 51)
-	return fmt.Sprintf("\033[38;5;%dm", ansi)
-}
-
-// getColoredText returns text with color if color is provided
-func getColoredText(text, color string) string {
-	if color == "" {
-		return text
-	}
-	ansiColor := hexToANSI(color)
-	if ansiColor == "" {
-		return text
-	}
-	return ansiColor + text + "\033[0m"
 }
 
 func (c *ChatClient) handleUserList(msg *Message) {
@@ -606,7 +512,6 @@ func (c *ChatClient) handleHelp(msg *Message) {
 	for cmd, desc := range msg.Data {
 		fmt.Printf("\033[1;32m%-25s\033[0m %s\n", cmd, desc)
 	}
-	fmt.Printf("\033[1;32m%-25s\033[0m %s\n", "#log", "показать содержимое лог-файла сервера")
 
 	fmt.Println(strings.Repeat("─", 60))
 	fmt.Print("> ")
