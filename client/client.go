@@ -171,6 +171,7 @@ func (c *ChatClient) Start() {
 	fmt.Println("  #all сообщение - массовое личное сообщение")
 	fmt.Println("  @ник сообщение - приватное сообщение")
 	fmt.Println("  #mailbox - проверить почтовый ящик")
+	fmt.Println("  #lastwriter - показать последнего писавшего пользователя")
 	fmt.Println("  #last <ник> - показать последнее сообщение пользователя")
 	fmt.Println("  #block ник - добавить в чёрный список")
 	fmt.Println("  #unblock ник - убрать из чёрного списка")
@@ -418,6 +419,9 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 		case "upper_toggle":
 			// Переключение режима капса
 			fmt.Printf("\n🔠 %s\n> ", msg.Content)
+	case "last_writer":
+		// Информация о последнем писавшем пользователе
+		c.printLastWriter(msg)
 	case "error":
 		// Ошибка
 		c.printError(msg)
@@ -538,6 +542,11 @@ func (c *ChatClient) printColorSet(msg *Message) {
 
 func (c *ChatClient) printWordLengthsToggle(msg *Message) {
 	fmt.Printf("\n🔢 %s\n> ", msg.Content)
+}
+
+// printLastWriter выводит информацию о последнем писавшем пользователе
+func (c *ChatClient) printLastWriter(msg *Message) {
+	fmt.Printf("\n📝 %s\n> ", msg.Content)
 }
 
 func (c *ChatClient) printError(msg *Message) {

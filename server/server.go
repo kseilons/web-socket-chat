@@ -71,6 +71,9 @@ type ChatServer struct {
 	// lastMessages хранит последнее отправленное сообщение для каждого ника
 	lastMessages      map[string]Message
 	lastMessagesMutex sync.RWMutex
+	lastWriter      string
+	lastWriteTime   time.Time
+	lastWriterMutex sync.RWMutex
 }
 
 func NewChatServer(host string, port int) *ChatServer {
@@ -512,6 +515,24 @@ func (s *ChatServer) findClientByNickname(nickname string) *Client {
 	return nil
 }
 
+// updateLastWriter обновляет информацию о последнем писавшем пользователе
+func (s *ChatServer) updateLastWriter(nickname string) {
+	s.lastWriterMutex.Lock()
+	defer s.lastWriterMutex.Unlock()
+
+	s.lastWriter = nickname
+	s.lastWriteTime = time.Now()
+}
+
+// getLastWriter получает информацию о последнем писавшем пользователе
+func (s *ChatServer) getLastWriter() (string, time.Time) {
+	s.lastWriterMutex.RLock()
+	defer s.lastWriterMutex.RUnlock()
+
+	return s.lastWriter, s.lastWriteTime
+}
+
+// handleClientMessage обрабатывает сообщения от клиента
 func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
@@ -532,6 +553,9 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 			Timestamp: time.Now().Format("15:04:05"),
 			Flags:     msg.Flags,
 		})
+		// Обновляем информацию о последнем писавшем
+		s.updateLastWriter(client.nickname)
+
 		s.broadcastJSONMessage(Message{
 			Type:      "chat",
 			Content:   content,
@@ -542,6 +566,9 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 
 	case "private":
 		// Личное сообщение
+		// Обновляем информацию о последнем писавшем
+		s.updateLastWriter(client.nickname)
+
 		// Специальная обработка команд, адресованных встроенному нику 'server'
 		lowerTo := strings.ToLower(msg.To)
 		if lowerTo == "server" || lowerTo == "agent" {
@@ -672,6 +699,9 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 		s.sendUserListJSON(client)
 	case "mailbox":
 		s.getMailboxStatusJSON(client)
+	case "lastwriter":
+		// Команда для вывода последнего писавшего пользователя
+		s.sendLastWriterJSON(client)
 	case "all":
 		content := msg.Data["content"]
 		if content == "" {
@@ -681,6 +711,9 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			})
 			return
 		}
+		// Обновляем информацию о последнем писавшем
+		s.updateLastWriter(client.nickname)
+
 		timestamp := time.Now().Format("15:04:05")
 		// Учитываем режим капса у отправителя
 		bcontent := content
@@ -912,6 +945,27 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 	}
 }
 
+// sendLastWriterJSON отправляет информацию о последнем писавшем пользователе
+func (s *ChatServer) sendLastWriterJSON(client *Client) {
+	lastWriter, lastWriteTime := s.getLastWriter()
+
+	if lastWriter == "" {
+		s.sendJSONMessage(client, Message{
+			Type:    "last_writer",
+			Content: "Пока никто не писал в чат",
+		})
+	} else {
+		timeStr := lastWriteTime.Format("15:04:05")
+		s.sendJSONMessage(client, Message{
+			Type:      "last_writer",
+			Content:   fmt.Sprintf("Последний писавший: %s в %s", lastWriter, timeStr),
+			From:      lastWriter,
+			Timestamp: timeStr,
+		})
+	}
+}
+
+// broadcastJSONMessage рассылает сообщение всем клиентам
 func (s *ChatServer) sendLogFile(client *Client) {
 	content, err := ioutil.ReadFile(s.logFile)
 	if err != nil {
@@ -994,6 +1048,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#users":         "список пользователей",
 		"#help":          "эта справка",
 		"#mailbox":       "проверить почтовый ящик",
+		"#lastwriter":    "показать последнего писавшего пользователя",
 		"#fav [ник]":     "добавить/удалить любимого писателя",
 		"#fav list":      "показать список",
 		"#fav clear":     "очистить список",
