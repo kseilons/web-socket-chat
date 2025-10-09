@@ -70,9 +70,31 @@ type ChatServer struct {
 	// lastMessages хранит последнее отправленное сообщение для каждого ника
 	lastMessages      map[string]Message
 	lastMessagesMutex sync.RWMutex
-	lastWriter      string
-	lastWriteTime   time.Time
-	lastWriterMutex sync.RWMutex
+	lastWriter        string
+	lastWriteTime     time.Time
+	lastWriterMutex   sync.RWMutex
+}
+
+// containsBannedWord проверяет, содержит ли текст запрещённые слова с учётом границ слов
+func (s *ChatServer) containsBannedWord(text string) bool {
+	lowerText := strings.ToLower(text)
+
+	// Регулярное выражение для точного совпадения форм слова "негр"
+	// \b — граница слова, чтобы не ловить "неграмотный"
+	negroRegex := regexp.MustCompile(`\b(негр|негра|негру|негром|негре|негры|негров|неграм|неграми|неграх)\b`)
+	return negroRegex.MatchString(lowerText)
+}
+
+// generateRandomColor generates a random hex color
+func generateRandomColor() string {
+	rand.Seed(time.Now().UnixNano())
+	return fmt.Sprintf("#%06X", rand.Intn(0xFFFFFF))
+}
+
+// isValidHexColor validates if a string is a valid 6-character hex color
+func isValidHexColor(color string) bool {
+	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
+	return matched
 }
 
 func NewChatServer(host string, port int) *ChatServer {
@@ -98,18 +120,6 @@ func NewChatServer(host string, port int) *ChatServer {
 		},
 		logFile: logFile,
 	}
-}
-
-// generateRandomColor generates a random hex color
-func generateRandomColor() string {
-	rand.Seed(time.Now().UnixNano())
-	return fmt.Sprintf("#%06X", rand.Intn(0xFFFFFF))
-}
-
-// isValidHexColor validates if a string is a valid 6-character hex color
-func isValidHexColor(color string) bool {
-	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
-	return matched
 }
 
 func (s *ChatServer) logToFile(message string) {
@@ -535,6 +545,14 @@ func (s *ChatServer) getLastWriter() (string, time.Time) {
 func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
+		if s.containsBannedWord(msg.Content) {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Сообщение содержит запрещённые слова",
+			})
+			s.logToFile(fmt.Sprintf("🚫 Заблокировано сообщение от %s: %s", client.nickname, msg.Content))
+			return
+		}
 		chatMessage := fmt.Sprintf("💬 %s: %s", client.nickname, msg.Content)
 		fmt.Println(chatMessage)
 		s.logToFile(chatMessage)
@@ -559,6 +577,15 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 		}, client)
 
 	case "private":
+		if s.containsBannedWord(msg.Content) {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Личное сообщение содержит запрещённые слова",
+			})
+			s.logToFile(fmt.Sprintf("🚫 Заблокировано ЛС от %s к %s: %s", client.nickname, msg.To, msg.Content))
+			return
+		}
+
 		// Личное сообщение
 		// Обновляем информацию о последнем писавшем
 		s.updateLastWriter(client.nickname)
@@ -695,6 +722,14 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 				Type:  "error",
 				Error: "Использование: #all сообщение",
 			})
+			return
+		}
+		if s.containsBannedWord(content) {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Массовое сообщение содержит запрещённые слова",
+			})
+			s.logToFile(fmt.Sprintf("🚫 Заблокировано массовое сообщение от %s: %s", client.nickname, content))
 			return
 		}
 		// Обновляем информацию о последнем писавшем
@@ -936,7 +971,6 @@ func (s *ChatServer) sendLastWriterJSON(client *Client) {
 	}
 }
 
-// broadcastJSONMessage рассылает сообщение всем клиентам
 func (s *ChatServer) sendLogFile(client *Client) {
 	content, err := ioutil.ReadFile(s.logFile)
 	if err != nil {
@@ -1037,6 +1071,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		Data: helpData,
 	})
 }
+
 func (s *ChatServer) isNicknameTaken(nickname string) bool {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
