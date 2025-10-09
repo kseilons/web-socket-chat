@@ -63,22 +63,44 @@ type ChatServer struct {
 	mailboxes    map[string]*Mailbox // никнейм -> почтовый ящик
 	mailboxMutex sync.RWMutex
 	upgrader     websocket.Upgrader
+	// lastMessages хранит последнее отправленное сообщение для каждого ника
+	lastMessages      map[string]Message
+	lastMessagesMutex sync.RWMutex
 }
 
 func NewChatServer(host string, port int) *ChatServer {
 	return &ChatServer{
-		host:        host,
-		port:        port,
-		clients:     make(map[*Client]bool),
-		running:     false,
-		userHistory: make(map[string]string),
-		mailboxes:   make(map[string]*Mailbox),
+		host:         host,
+		port:         port,
+		clients:      make(map[*Client]bool),
+		running:      false,
+		userHistory:  make(map[string]string),
+		mailboxes:    make(map[string]*Mailbox),
+		lastMessages: make(map[string]Message),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Разрешаем подключения с любых источников
 			},
 		},
 	}
+}
+
+// setLastMessage сохраняет последнее сообщение для данного ника
+func (s *ChatServer) setLastMessage(nickname string, msg Message) {
+	if nickname == "" {
+		return
+	}
+	s.lastMessagesMutex.Lock()
+	defer s.lastMessagesMutex.Unlock()
+	s.lastMessages[nickname] = msg
+}
+
+// getLastMessage возвращает последнее сообщение для ника и true, если оно найдено
+func (s *ChatServer) getLastMessage(nickname string) (Message, bool) {
+	s.lastMessagesMutex.RLock()
+	defer s.lastMessagesMutex.RUnlock()
+	msg, ok := s.lastMessages[nickname]
+	return msg, ok
 }
 
 // Функции для работы с WebSocket сообщениями
@@ -451,6 +473,14 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
 		// Обычное сообщение в чат
+		// Сохраняем как последнее сообщение отправителя
+		s.setLastMessage(client.nickname, Message{
+			Type:      "chat",
+			Content:   msg.Content,
+			From:      client.nickname,
+			Timestamp: time.Now().Format("15:04:05"),
+			Flags:     msg.Flags,
+		})
 		s.broadcastJSONMessage(Message{
 			Type:      "chat",
 			Content:   msg.Content,
@@ -461,6 +491,35 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 
 	case "private":
 		// Личное сообщение
+		// Специальная обработка команд, адресованных встроенному нику 'server'
+		lowerTo := strings.ToLower(msg.To)
+		if lowerTo == "server" || lowerTo == "agent" {
+			// Ожидаем команды вида: last <ник> или #last <ник>
+			parts := strings.Fields(msg.Content)
+			if len(parts) >= 2 && (strings.ToLower(parts[0]) == "last" || strings.ToLower(parts[0]) == "#last") {
+				target := parts[1]
+				if lm, ok := s.getLastMessage(target); ok {
+					s.sendJSONMessage(client, Message{
+						Type:      "last_result",
+						Content:   fmt.Sprintf("Последнее сообщение %s: %s", target, lm.Content),
+						From:      target,
+						Timestamp: lm.Timestamp,
+					})
+				} else {
+					s.sendJSONMessage(client, Message{
+						Type:    "last_result",
+						Content: fmt.Sprintf("Нет сообщений от %s", target),
+					})
+				}
+			} else {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: "Использование: @server last <ник>",
+				})
+			}
+			return
+		}
+
 		targetClient := s.findClientByNickname(msg.To)
 		if targetClient != nil && targetClient != client {
 			// Проверяем блокировку
@@ -557,6 +616,14 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			return
 		}
 		timestamp := time.Now().Format("15:04:05")
+		// Сохраняем последнее массовое сообщение отправителя
+		s.setLastMessage(client.nickname, Message{
+			Type:      "mass_private",
+			Content:   content,
+			From:      client.nickname,
+			Timestamp: timestamp,
+			Flags:     map[string]bool{"mass_private": true},
+		})
 		s.broadcastJSONMessage(Message{
 			Type:      "mass_private",
 			Content:   content,
@@ -685,13 +752,30 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 					})
 				}
 			}
-		default:
+	case "last":
+		// Ожидается msg.Data["target"] = ник
+		target := msg.Data["target"]
+		if target == "" {
 			s.sendJSONMessage(client, Message{
 				Type:  "error",
-				Error: "Неизвестная команда fav",
+				Error: "Использование: #last <ник>",
+			})
+			return
+		}
+		if lm, ok := s.getLastMessage(target); ok {
+			s.sendJSONMessage(client, Message{
+				Type:      "last_result",
+				Content:   lm.Content,
+				From:      lm.From,
+				Timestamp: lm.Timestamp,
+				Data:      map[string]string{"type": lm.Type},
+			})
+		} else {
+			s.sendJSONMessage(client, Message{
+				Type:    "last_result",
+				Content: fmt.Sprintf("Нет сообщений от %s", target),
 			})
 		}
-
 	case "wordlengths":
 		client.showWordLengths = !client.showWordLengths
 		status := "выключен"
