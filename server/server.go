@@ -752,6 +752,12 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 					})
 				}
 			}
+		default:
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Неизвестная команда fav",
+			})
+		}
 	case "last":
 		// Ожидается msg.Data["target"] = ник
 		target := msg.Data["target"]
