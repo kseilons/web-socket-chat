@@ -429,7 +429,7 @@ func (c *ChatClient) printChatMessage(msg *Message) {
 	if msg.Data != nil {
 		color = msg.Data["color"]
 	}
-	
+
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
@@ -448,7 +448,7 @@ func (c *ChatClient) printPrivateMessage(msg *Message) {
 	if msg.Data != nil {
 		color = msg.Data["color"]
 	}
-	
+
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
@@ -471,7 +471,7 @@ func (c *ChatClient) printMassPrivateMessage(msg *Message) {
 	if msg.Data != nil {
 		color = msg.Data["color"]
 	}
-	
+
 	// Проверяем флаги для определения типа сообщения
 	if msg.Flags != nil && msg.Flags["favorite"] {
 		// Сообщение от любимого писателя
@@ -530,6 +530,8 @@ func (c *ChatClient) printUnblocked(msg *Message) {
 
 func (c *ChatClient) printColorSet(msg *Message) {
 	fmt.Printf("\n🎨 %s\n> ", msg.Content)
+}
+
 func (c *ChatClient) printWordLengthsToggle(msg *Message) {
 	fmt.Printf("\n🔢 %s\n> ", msg.Content)
 }
@@ -543,18 +545,18 @@ func hexToANSI(hex string) string {
 	if hex == "" || len(hex) != 7 || hex[0] != '#' {
 		return ""
 	}
-	
+
 	// Parse hex values
 	r, err1 := strconv.ParseInt(hex[1:3], 16, 64)
 	g, err2 := strconv.ParseInt(hex[3:5], 16, 64)
 	b, err3 := strconv.ParseInt(hex[5:7], 16, 64)
-	
+
 	if err1 != nil || err2 != nil || err3 != nil {
 		return ""
 	}
-	
+
 	// Convert to ANSI 256 color (approximation)
-	ansi := 16 + (r/51)*36 + (g/51)*6 + (b/51)
+	ansi := 16 + (r/51)*36 + (g/51)*6 + (b / 51)
 	return fmt.Sprintf("\033[38;5;%dm", ansi)
 }
 

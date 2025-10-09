@@ -41,7 +41,7 @@ type Client struct {
 	blocked         map[string]bool
 	favoriteUsers   map[string]bool
 	showWordLengths bool
-	color         string // Hex color for user messages
+	color           string // Hex color for user messages
 }
 
 type MailboxMessage struct {
@@ -107,6 +107,8 @@ func generateRandomColor() string {
 func isValidHexColor(color string) bool {
 	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
 	return matched
+}
+
 func (s *ChatServer) logToFile(message string) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logMessage := fmt.Sprintf("[%s] %s\n", timestamp, message)
@@ -121,6 +123,8 @@ func (s *ChatServer) logToFile(message string) {
 	defer file.Close()
 
 	file.WriteString(logMessage)
+}
+
 // setLastMessage сохраняет последнее сообщение для данного ника
 func (s *ChatServer) setLastMessage(nickname string, msg Message) {
 	if nickname == "" {
