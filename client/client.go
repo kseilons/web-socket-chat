@@ -173,6 +173,7 @@ func (c *ChatClient) Start() {
 	fmt.Println("  #last <ник> - показать последнее сообщение пользователя")
 	fmt.Println("  #block ник - добавить в чёрный список")
 	fmt.Println("  #unblock ник - убрать из чёрного списка")
+	fmt.Println("  #wordlengths - переключить режим показа длин слов")
 	fmt.Println("  /quit - выход из чата")
 	fmt.Println(strings.Repeat("=", 50))
 
@@ -230,7 +231,7 @@ func (c *ChatClient) handleCommand(message string) {
 	msg.Data["command"] = cmd
 
 	switch cmd {
-	case "help", "users", "mailbox":
+	case "help", "users", "mailbox", "wordlengths":
 		// Простые команды без параметров
 	case "last":
 		if len(parts) < 2 {
@@ -381,6 +382,9 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 	case "unblocked":
 		// Пользователь разблокирован
 		c.printUnblocked(msg)
+	case "wordlengths_toggle":
+		// Переключение режима показа длин слов
+		c.printWordLengthsToggle(msg)
 	case "error":
 		// Ошибка
 		c.printError(msg)
@@ -469,6 +473,10 @@ func (c *ChatClient) printBlocked(msg *Message) {
 
 func (c *ChatClient) printUnblocked(msg *Message) {
 	fmt.Printf("\n✅ %s\n> ", msg.Content)
+}
+
+func (c *ChatClient) printWordLengthsToggle(msg *Message) {
+	fmt.Printf("\n🔢 %s\n> ", msg.Content)
 }
 
 func (c *ChatClient) printError(msg *Message) {
