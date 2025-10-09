@@ -171,10 +171,13 @@ func (c *ChatClient) Start() {
 	fmt.Println("  #all сообщение - массовое личное сообщение")
 	fmt.Println("  @ник сообщение - приватное сообщение")
 	fmt.Println("  #mailbox - проверить почтовый ящик")
+	fmt.Println("  #last <ник> - показать последнее сообщение пользователя")
 	fmt.Println("  #block ник - добавить в чёрный список")
 	fmt.Println("  #unblock ник - убрать из чёрного списка")
 	fmt.Println("  #color - установить случайный цвет текста сообщений")
 	fmt.Println("  #color #hex - установить цвет текста сообщений (например, #FF0000)")
+	fmt.Println("  #log - показать содержимое лог-файла сервера")
+	fmt.Println("  #wordlengths - переключить режим показа длин слов")
 	fmt.Println("  /quit - выход из чата")
 	fmt.Println(strings.Repeat("=", 50))
 
@@ -232,8 +235,14 @@ func (c *ChatClient) handleCommand(message string) {
 	msg.Data["command"] = cmd
 
 	switch cmd {
-	case "help", "users", "mailbox":
+	case "help", "users", "mailbox", "wordlengths":
 		// Простые команды без параметров
+	case "last":
+		if len(parts) < 2 {
+			fmt.Println("❌ Использование: #last <ник>")
+			return
+		}
+		msg.Data["target"] = parts[1]
 	case "all":
 		if len(parts) < 2 {
 			fmt.Println("❌ Использование: #all сообщение")
@@ -269,6 +278,8 @@ func (c *ChatClient) handleCommand(message string) {
 				msg.Data["target"] = subParts[1]
 			}
 		}
+	case "log":
+		// Directly send the log command without redundant calls
 	default:
 		fmt.Printf("❌ Неизвестная команда: %s\n", cmd)
 		return
@@ -299,6 +310,17 @@ func (c *ChatClient) handlePrivateMessage(message string) {
 	err := c.sendJSONMessage(msg)
 	if err != nil {
 		fmt.Printf("❌ Ошибка отправки личного сообщения: %v\n", err)
+	}
+}
+
+func (c *ChatClient) requestLog() {
+	msg := Message{
+		Type: "command",
+		Data: map[string]string{"command": "log"},
+	}
+	err := c.conn.WriteJSON(msg)
+	if err != nil {
+		fmt.Printf("❌ Ошибка запроса лог-файла: %v\n", err)
 	}
 }
 
@@ -347,6 +369,13 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 	case "mailbox_status":
 		// Статус почтового ящика
 		c.printMailboxStatus(msg)
+	case "last_result":
+		// Результат команды #last
+		if msg.From != "" {
+			fmt.Printf("\nПоследнее от %s (%s): %s\n> ", msg.From, msg.Timestamp, msg.Content)
+		} else {
+			fmt.Printf("\n%s\n> ", msg.Content)
+		}
 	case "offline_message":
 		// Отложенное сообщение
 		c.printOfflineMessage(msg)
@@ -377,6 +406,14 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 	case "color_set":
 		// Цвет установлен
 		c.printColorSet(msg)
+	case "log":
+		fmt.Println("\n📜 Содержимое лог-файла сервера:")
+		fmt.Println(strings.Repeat("─", 60))
+		fmt.Println(msg.Content)
+		fmt.Println(strings.Repeat("─", 60))
+	case "wordlengths_toggle":
+		// Переключение режима показа длин слов
+		c.printWordLengthsToggle(msg)
 	case "error":
 		// Ошибка
 		c.printError(msg)
@@ -493,6 +530,8 @@ func (c *ChatClient) printUnblocked(msg *Message) {
 
 func (c *ChatClient) printColorSet(msg *Message) {
 	fmt.Printf("\n🎨 %s\n> ", msg.Content)
+func (c *ChatClient) printWordLengthsToggle(msg *Message) {
+	fmt.Printf("\n🔢 %s\n> ", msg.Content)
 }
 
 func (c *ChatClient) printError(msg *Message) {
@@ -552,6 +591,7 @@ func (c *ChatClient) handleHelp(msg *Message) {
 	for cmd, desc := range msg.Data {
 		fmt.Printf("\033[1;32m%-25s\033[0m %s\n", cmd, desc)
 	}
+	fmt.Printf("\033[1;32m%-25s\033[0m %s\n", "#log", "показать содержимое лог-файла сервера")
 
 	fmt.Println(strings.Repeat("─", 60))
 	fmt.Print("> ")

@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,12 +34,13 @@ type Message struct {
 }
 
 type Client struct {
-	conn          *websocket.Conn
-	nickname      string
-	address       string
-	send          chan Message
-	blocked       map[string]bool
-	favoriteUsers map[string]bool
+	conn            *websocket.Conn
+	nickname        string
+	address         string
+	send            chan Message
+	blocked         map[string]bool
+	favoriteUsers   map[string]bool
+	showWordLengths bool
 	color         string // Hex color for user messages
 }
 
@@ -63,21 +66,34 @@ type ChatServer struct {
 	mailboxes    map[string]*Mailbox // никнейм -> почтовый ящик
 	mailboxMutex sync.RWMutex
 	upgrader     websocket.Upgrader
+	logFile      string
+	// lastMessages хранит последнее отправленное сообщение для каждого ника
+	lastMessages      map[string]Message
+	lastMessagesMutex sync.RWMutex
 }
 
 func NewChatServer(host string, port int) *ChatServer {
+	logFile := "server.log"
+	file, err := os.Create(logFile)
+	if err != nil {
+		log.Fatalf("❌ Не удалось создать лог-файл: %v", err)
+	}
+	file.Close()
+
 	return &ChatServer{
-		host:        host,
-		port:        port,
-		clients:     make(map[*Client]bool),
-		running:     false,
-		userHistory: make(map[string]string),
-		mailboxes:   make(map[string]*Mailbox),
+		host:         host,
+		port:         port,
+		clients:      make(map[*Client]bool),
+		running:      false,
+		userHistory:  make(map[string]string),
+		mailboxes:    make(map[string]*Mailbox),
+		lastMessages: make(map[string]Message),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Разрешаем подключения с любых источников
 			},
 		},
+		logFile: logFile,
 	}
 }
 
@@ -91,6 +107,36 @@ func generateRandomColor() string {
 func isValidHexColor(color string) bool {
 	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
 	return matched
+func (s *ChatServer) logToFile(message string) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logMessage := fmt.Sprintf("[%s] %s\n", timestamp, message)
+
+	// Log to console and append to log file
+	fmt.Print(logMessage)
+	file, err := os.OpenFile(s.logFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("❌ Ошибка записи в лог-файл: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	file.WriteString(logMessage)
+// setLastMessage сохраняет последнее сообщение для данного ника
+func (s *ChatServer) setLastMessage(nickname string, msg Message) {
+	if nickname == "" {
+		return
+	}
+	s.lastMessagesMutex.Lock()
+	defer s.lastMessagesMutex.Unlock()
+	s.lastMessages[nickname] = msg
+}
+
+// getLastMessage возвращает последнее сообщение для ника и true, если оно найдено
+func (s *ChatServer) getLastMessage(nickname string) (Message, bool) {
+	s.lastMessagesMutex.RLock()
+	defer s.lastMessagesMutex.RUnlock()
+	msg, ok := s.lastMessages[nickname]
+	return msg, ok
 }
 
 // Функции для работы с WebSocket сообщениями
@@ -119,6 +165,16 @@ func (s *ChatServer) readJSONMessage(conn *websocket.Conn) (*Message, error) {
 	return &msg, nil
 }
 
+// replaceWordsWithLengths заменяет слова в тексте на их длины
+func replaceWordsWithLengths(text string) string {
+	// Регулярное выражение для поиска слов (буквы, цифры, дефисы, апострофы)
+	wordRegex := regexp.MustCompile(`\b[\p{L}\p{N}'-]+\b`)
+
+	return wordRegex.ReplaceAllStringFunc(text, func(word string) string {
+		return strconv.Itoa(len(word))
+	})
+}
+
 func (s *ChatServer) Start() error {
 	address := fmt.Sprintf("%s:%d", s.host, s.port)
 	s.running = true
@@ -127,9 +183,9 @@ func (s *ChatServer) Start() error {
 	http.HandleFunc("/ws", s.handleWebSocket)
 	http.HandleFunc("/", s.handleHome)
 
-	fmt.Printf("🚀 WebSocket чат-сервер запущен на %s\n", address)
-	fmt.Println("WebSocket endpoint: ws://" + address + "/ws")
-	fmt.Println("Ожидание подключений...")
+	startMessage := fmt.Sprintf("🚀 WebSocket чат-сервер запущен на %s\nWebSocket endpoint: ws://%s/ws\nОжидание подключений...", address, address)
+	fmt.Println(startMessage)
+	s.logToFile(fmt.Sprintf("Сервер запущен на %s", address))
 
 	// Обработка сигналов для graceful shutdown
 	go s.handleSignals()
@@ -163,15 +219,18 @@ func (s *ChatServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientAddr := r.RemoteAddr
-	fmt.Printf("📱 Новое WebSocket подключение: %s\n", clientAddr)
+	connectionMessage := fmt.Sprintf("📱 Новое WebSocket подключение: %s", clientAddr)
+	fmt.Println(connectionMessage)
+	s.logToFile(connectionMessage)
 
 	// Создаем клиента
 	client := &Client{
-		conn:          conn,
-		address:       clientAddr,
-		send:          make(chan Message, 256),
-		blocked:       make(map[string]bool),
-		favoriteUsers: make(map[string]bool),
+		conn:            conn,
+		address:         clientAddr,
+		send:            make(chan Message, 256),
+		blocked:         make(map[string]bool),
+		favoriteUsers:   make(map[string]bool),
+		showWordLengths: false,
 	}
 
 	// Добавляем клиента в список
@@ -377,9 +436,16 @@ func (s *ChatServer) deliverOfflineMessages(client *Client) {
 	// Доставляем все сообщения
 	for _, msg := range mailbox.Messages {
 		timestamp := msg.Time.Format("15:04:05")
+		content := msg.Message
+
+		// Применяем фильтр длин слов если включен
+		if client.showWordLengths {
+			content = replaceWordsWithLengths(msg.Message)
+		}
+
 		s.sendJSONMessage(client, Message{
 			Type:      "offline_message",
-			Content:   msg.Message,
+			Content:   content,
 			From:      msg.From,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"offline": true},
@@ -444,7 +510,18 @@ func (s *ChatServer) findClientByNickname(nickname string) *Client {
 func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
+		chatMessage := fmt.Sprintf("💬 %s: %s", client.nickname, msg.Content)
+		fmt.Println(chatMessage)
+		s.logToFile(chatMessage)
 		// Обычное сообщение в чат
+		// Сохраняем как последнее сообщение отправителя
+		s.setLastMessage(client.nickname, Message{
+			Type:      "chat",
+			Content:   msg.Content,
+			From:      client.nickname,
+			Timestamp: time.Now().Format("15:04:05"),
+			Flags:     msg.Flags,
+		})
 		s.broadcastJSONMessage(Message{
 			Type:      "chat",
 			Content:   msg.Content,
@@ -455,6 +532,35 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 
 	case "private":
 		// Личное сообщение
+		// Специальная обработка команд, адресованных встроенному нику 'server'
+		lowerTo := strings.ToLower(msg.To)
+		if lowerTo == "server" || lowerTo == "agent" {
+			// Ожидаем команды вида: last <ник> или #last <ник>
+			parts := strings.Fields(msg.Content)
+			if len(parts) >= 2 && (strings.ToLower(parts[0]) == "last" || strings.ToLower(parts[0]) == "#last") {
+				target := parts[1]
+				if lm, ok := s.getLastMessage(target); ok {
+					s.sendJSONMessage(client, Message{
+						Type:      "last_result",
+						Content:   fmt.Sprintf("Последнее сообщение %s: %s", target, lm.Content),
+						From:      target,
+						Timestamp: lm.Timestamp,
+					})
+				} else {
+					s.sendJSONMessage(client, Message{
+						Type:    "last_result",
+						Content: fmt.Sprintf("Нет сообщений от %s", target),
+					})
+				}
+			} else {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: "Использование: @server last <ник>",
+				})
+			}
+			return
+		}
+
 		targetClient := s.findClientByNickname(msg.To)
 		if targetClient != nil && targetClient != client {
 			// Проверяем блокировку
@@ -497,7 +603,9 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				Timestamp: timestamp,
 				Flags:     map[string]bool{"private": true},
 			})
-			fmt.Printf("💌 ЛС от %s к %s: %s\n", client.nickname, msg.To, msg.Content)
+			privateMessage := fmt.Sprintf("💌 ЛС от %s к %s: %s", client.nickname, msg.To, msg.Content)
+			fmt.Println(privateMessage)
+			s.logToFile(privateMessage)
 		} else {
 			// Пользователь оффлайн - сохраняем как отложенное сообщение
 			if msg.To == client.nickname {
@@ -556,6 +664,14 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			return
 		}
 		timestamp := time.Now().Format("15:04:05")
+		// Сохраняем последнее массовое сообщение отправителя
+		s.setLastMessage(client.nickname, Message{
+			Type:      "mass_private",
+			Content:   content,
+			From:      client.nickname,
+			Timestamp: timestamp,
+			Flags:     map[string]bool{"mass_private": true},
+		})
 		s.broadcastJSONMessage(Message{
 			Type:      "mass_private",
 			Content:   content,
@@ -690,6 +806,43 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 				Error: "Неизвестная команда fav",
 			})
 		}
+	case "last":
+		// Ожидается msg.Data["target"] = ник
+		target := msg.Data["target"]
+		if target == "" {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Использование: #last <ник>",
+			})
+			return
+		}
+		if lm, ok := s.getLastMessage(target); ok {
+			s.sendJSONMessage(client, Message{
+				Type:      "last_result",
+				Content:   lm.Content,
+				From:      lm.From,
+				Timestamp: lm.Timestamp,
+				Data:      map[string]string{"type": lm.Type},
+			})
+		} else {
+			s.sendJSONMessage(client, Message{
+				Type:    "last_result",
+				Content: fmt.Sprintf("Нет сообщений от %s", target),
+			})
+		}
+	case "wordlengths":
+		client.showWordLengths = !client.showWordLengths
+		status := "выключен"
+		if client.showWordLengths {
+			status = "включен"
+		}
+		s.sendJSONMessage(client, Message{
+			Type:    "wordlengths_toggle",
+			Content: fmt.Sprintf("Режим показа длин слов %s", status),
+		})
+
+	case "log":
+		s.sendLogFile(client)
 
 	case "color":
 		target := msg.Data["target"]
@@ -726,6 +879,22 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 	}
 }
 
+func (s *ChatServer) sendLogFile(client *Client) {
+	content, err := ioutil.ReadFile(s.logFile)
+	if err != nil {
+		s.sendJSONMessage(client, Message{
+			Type:  "error",
+			Error: "Не удалось прочитать лог-файл",
+		})
+		return
+	}
+
+	s.sendJSONMessage(client, Message{
+		Type:    "log",
+		Content: string(content),
+	})
+}
+
 func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 	s.mutex.Lock()
 	clients := make(map[*Client]bool)
@@ -748,6 +917,11 @@ func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 
 		// Создаем копию сообщения для каждого клиента
 		clientMsg := msg
+
+		// Применяем фильтр длин слов если включен
+		if client.showWordLengths && (msg.Type == "chat" || msg.Type == "private" || msg.Type == "mass_private") {
+			clientMsg.Content = replaceWordsWithLengths(msg.Content)
+		}
 
 		// Добавляем флаг "favorite" если отправитель в списке любимых получателя
 		if (msg.Type == "chat" || msg.Type == "mass_private") && client.favoriteUsers[msg.From] {
@@ -794,6 +968,8 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#unblock ник":   "убрать из чёрного списка",
 		"#color":         "установить случайный цвет текста сообщений",
 		"#color #hex":    "установить цвет текста сообщений (например, #FF0000)",
+		"#log":           "получить содержимое лог-файла",
+		"#wordlengths":   "переключить режим показа длин слов",
 		"/quit":          "выход из чата",
 	}
 
@@ -847,12 +1023,13 @@ func (s *ChatServer) disconnectClient(client *Client) {
 
 	if client.nickname != "" {
 		leaveMessage := fmt.Sprintf("🔴 %s покинул чат", client.nickname)
+		fmt.Println(leaveMessage)
+		s.logToFile(leaveMessage)
 		s.broadcastJSONMessage(Message{
 			Type:      "system",
 			Content:   leaveMessage,
 			Timestamp: time.Now().Format("15:04:05"),
 		}, nil)
-		fmt.Printf("👋 %s отключился\n", client.nickname)
 	}
 }
 
@@ -884,6 +1061,14 @@ func (s *ChatServer) Shutdown() {
 	}
 	s.clients = make(map[*Client]bool)
 	s.mutex.Unlock()
+
+	// Удаляем лог-файл
+	err := os.Remove(s.logFile)
+	if err != nil {
+		fmt.Printf("❌ Ошибка удаления лог-файла: %v\n", err)
+	} else {
+		fmt.Println("🗑️ Лог-файл удалён")
+	}
 
 	fmt.Println("✅ Сервер остановлен")
 }
