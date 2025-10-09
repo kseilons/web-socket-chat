@@ -175,6 +175,7 @@ func (c *ChatClient) Start() {
 	fmt.Println("  #last <ник> - показать последнее сообщение пользователя")
 	fmt.Println("  #block ник - добавить в чёрный список")
 	fmt.Println("  #unblock ник - убрать из чёрного списка")
+	fmt.Println("  #upper - отображать ваши сообщения в верхнем регистре")
 	fmt.Println("  #color - установить случайный цвет текста сообщений")
 	fmt.Println("  #color #hex - установить цвет текста сообщений (например, #FF0000)")
 	fmt.Println("  #log - показать содержимое лог-файла сервера")
@@ -236,7 +237,7 @@ func (c *ChatClient) handleCommand(message string) {
 	msg.Data["command"] = cmd
 
 	switch cmd {
-	case "help", "users", "mailbox", "wordlengths":
+	case "help", "users", "mailbox", "wordlengths", "upper":
 		// Простые команды без параметров
 	case "last":
 		if len(parts) < 2 {
@@ -415,6 +416,9 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 	case "wordlengths_toggle":
 		// Переключение режима показа длин слов
 		c.printWordLengthsToggle(msg)
+		case "upper_toggle":
+			// Переключение режима капса
+			fmt.Printf("\n🔠 %s\n> ", msg.Content)
 	case "last_writer":
 		// Информация о последнем писавшем пользователе
 		c.printLastWriter(msg)
