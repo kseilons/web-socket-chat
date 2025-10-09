@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -40,6 +42,7 @@ type Client struct {
 	favoriteUsers   map[string]bool
 	showWordLengths bool
 	showUppercase   bool
+	color           string // Hex color for user messages
 }
 
 type MailboxMessage struct {
@@ -64,12 +67,20 @@ type ChatServer struct {
 	mailboxes    map[string]*Mailbox // никнейм -> почтовый ящик
 	mailboxMutex sync.RWMutex
 	upgrader     websocket.Upgrader
+	logFile      string
 	// lastMessages хранит последнее отправленное сообщение для каждого ника
 	lastMessages      map[string]Message
 	lastMessagesMutex sync.RWMutex
 }
 
 func NewChatServer(host string, port int) *ChatServer {
+	logFile := "server.log"
+	file, err := os.Create(logFile)
+	if err != nil {
+		log.Fatalf("❌ Не удалось создать лог-файл: %v", err)
+	}
+	file.Close()
+
 	return &ChatServer{
 		host:         host,
 		port:         port,
@@ -83,7 +94,36 @@ func NewChatServer(host string, port int) *ChatServer {
 				return true // Разрешаем подключения с любых источников
 			},
 		},
+		logFile: logFile,
 	}
+}
+
+// generateRandomColor generates a random hex color
+func generateRandomColor() string {
+	rand.Seed(time.Now().UnixNano())
+	return fmt.Sprintf("#%06X", rand.Intn(0xFFFFFF))
+}
+
+// isValidHexColor validates if a string is a valid 6-character hex color
+func isValidHexColor(color string) bool {
+	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
+	return matched
+}
+
+func (s *ChatServer) logToFile(message string) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logMessage := fmt.Sprintf("[%s] %s\n", timestamp, message)
+
+	// Log to console and append to log file
+	fmt.Print(logMessage)
+	file, err := os.OpenFile(s.logFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("❌ Ошибка записи в лог-файл: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	file.WriteString(logMessage)
 }
 
 // setLastMessage сохраняет последнее сообщение для данного ника
@@ -148,9 +188,9 @@ func (s *ChatServer) Start() error {
 	http.HandleFunc("/ws", s.handleWebSocket)
 	http.HandleFunc("/", s.handleHome)
 
-	fmt.Printf("🚀 WebSocket чат-сервер запущен на %s\n", address)
-	fmt.Println("WebSocket endpoint: ws://" + address + "/ws")
-	fmt.Println("Ожидание подключений...")
+	startMessage := fmt.Sprintf("🚀 WebSocket чат-сервер запущен на %s\nWebSocket endpoint: ws://%s/ws\nОжидание подключений...", address, address)
+	fmt.Println(startMessage)
+	s.logToFile(fmt.Sprintf("Сервер запущен на %s", address))
 
 	// Обработка сигналов для graceful shutdown
 	go s.handleSignals()
@@ -184,7 +224,9 @@ func (s *ChatServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientAddr := r.RemoteAddr
-	fmt.Printf("📱 Новое WebSocket подключение: %s\n", clientAddr)
+	connectionMessage := fmt.Sprintf("📱 Новое WebSocket подключение: %s", clientAddr)
+	fmt.Println(connectionMessage)
+	s.logToFile(connectionMessage)
 
 	// Создаем клиента
 	client := &Client{
@@ -473,6 +515,9 @@ func (s *ChatServer) findClientByNickname(nickname string) *Client {
 func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
+		chatMessage := fmt.Sprintf("💬 %s: %s", client.nickname, msg.Content)
+		fmt.Println(chatMessage)
+		s.logToFile(chatMessage)
 		// Обычное сообщение в чат
 		// Учитываем режим капса у отправителя
 		content := msg.Content
@@ -557,6 +602,11 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				privateMsg.Flags["favorite"] = true
 			}
 
+			// Добавляем цвет отправителя
+			if client.color != "" {
+				privateMsg.Data = map[string]string{"color": client.color}
+			}
+
 			s.sendJSONMessage(targetClient, privateMsg)
 			// Отправляем подтверждение отправителю
 			s.sendJSONMessage(client, Message{
@@ -567,7 +617,9 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				Timestamp: timestamp,
 				Flags:     map[string]bool{"private": true},
 			})
-			fmt.Printf("💌 ЛС от %s к %s: %s\n", client.nickname, msg.To, msg.Content)
+			privateMessage := fmt.Sprintf("💌 ЛС от %s к %s: %s", client.nickname, msg.To, msg.Content)
+			fmt.Println(privateMessage)
+			s.logToFile(privateMessage)
 		} else {
 			// Пользователь оффлайн - сохраняем как отложенное сообщение (учитывая капс)
 			if msg.To == client.nickname {
@@ -771,6 +823,11 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 					})
 				}
 			}
+		default:
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Неизвестная команда fav",
+			})
 		}
 	case "last":
 		// Ожидается msg.Data["target"] = ник
@@ -817,6 +874,35 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 				Type:    "upper_toggle",
 				Content: fmt.Sprintf("Режим капса %s", status),
 			})
+	case "log":
+		s.sendLogFile(client)
+
+	case "color":
+		target := msg.Data["target"]
+		if target == "" {
+			// Random color
+			client.color = generateRandomColor()
+			s.sendJSONMessage(client, Message{
+				Type:    "color_set",
+				Content: fmt.Sprintf("Цвет текста сообщений установлен: %s", client.color),
+				Data:    map[string]string{"color": client.color},
+			})
+		} else {
+			// Validate hex color
+			if !isValidHexColor(target) {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: "Неверный формат цвета. Используйте #RRGGBB (например, #FF0000)",
+				})
+				return
+			}
+			client.color = strings.ToUpper(target)
+			s.sendJSONMessage(client, Message{
+				Type:    "color_set",
+				Content: fmt.Sprintf("Цвет текста сообщений установлен: %s", client.color),
+				Data:    map[string]string{"color": client.color},
+			})
+		}
 
 	default:
 		s.sendJSONMessage(client, Message{
@@ -824,6 +910,22 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			Error: "Неизвестная команда",
 		})
 	}
+}
+
+func (s *ChatServer) sendLogFile(client *Client) {
+	content, err := ioutil.ReadFile(s.logFile)
+	if err != nil {
+		s.sendJSONMessage(client, Message{
+			Type:  "error",
+			Error: "Не удалось прочитать лог-файл",
+		})
+		return
+	}
+
+	s.sendJSONMessage(client, Message{
+		Type:    "log",
+		Content: string(content),
+	})
 }
 
 func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
@@ -862,6 +964,14 @@ func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 			clientMsg.Flags["favorite"] = true
 		}
 
+		// Добавляем цвет отправителя в Data
+		if sender := s.findClientByNickname(msg.From); sender != nil && sender.color != "" {
+			if clientMsg.Data == nil {
+				clientMsg.Data = make(map[string]string)
+			}
+			clientMsg.Data["color"] = sender.color
+		}
+
 		err := s.sendJSONMessage(client, clientMsg)
 		if err != nil {
 			fmt.Printf("❌ Ошибка отправки сообщения %s: %v\n", client.nickname, err)
@@ -889,6 +999,9 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#fav clear":     "очистить список",
 		"#block ник":     "добавить в чёрный список",
 		"#unblock ник":   "убрать из чёрного списка",
+		"#color":         "установить случайный цвет текста сообщений",
+		"#color #hex":    "установить цвет текста сообщений (например, #FF0000)",
+		"#log":           "получить содержимое лог-файла",
 		"#wordlengths":   "переключить режим показа длин слов",
 		"#upper":         "отображать ваши сообщения в верхнем регистре",
 		"/quit":          "выход из чата",
@@ -944,12 +1057,13 @@ func (s *ChatServer) disconnectClient(client *Client) {
 
 	if client.nickname != "" {
 		leaveMessage := fmt.Sprintf("🔴 %s покинул чат", client.nickname)
+		fmt.Println(leaveMessage)
+		s.logToFile(leaveMessage)
 		s.broadcastJSONMessage(Message{
 			Type:      "system",
 			Content:   leaveMessage,
 			Timestamp: time.Now().Format("15:04:05"),
 		}, nil)
-		fmt.Printf("👋 %s отключился\n", client.nickname)
 	}
 }
 
@@ -981,6 +1095,14 @@ func (s *ChatServer) Shutdown() {
 	}
 	s.clients = make(map[*Client]bool)
 	s.mutex.Unlock()
+
+	// Удаляем лог-файл
+	err := os.Remove(s.logFile)
+	if err != nil {
+		fmt.Printf("❌ Ошибка удаления лог-файла: %v\n", err)
+	} else {
+		fmt.Println("🗑️ Лог-файл удалён")
+	}
 
 	fmt.Println("✅ Сервер остановлен")
 }
