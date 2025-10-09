@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -60,9 +61,17 @@ type ChatServer struct {
 	mailboxes    map[string]*Mailbox // никнейм -> почтовый ящик
 	mailboxMutex sync.RWMutex
 	upgrader     websocket.Upgrader
+	logFile      string
 }
 
 func NewChatServer(host string, port int) *ChatServer {
+	logFile := "server.log"
+	file, err := os.Create(logFile)
+	if err != nil {
+		log.Fatalf("❌ Не удалось создать лог-файл: %v", err)
+	}
+	file.Close()
+
 	return &ChatServer{
 		host:        host,
 		port:        port,
@@ -75,7 +84,24 @@ func NewChatServer(host string, port int) *ChatServer {
 				return true // Разрешаем подключения с любых источников
 			},
 		},
+		logFile: logFile,
 	}
+}
+
+func (s *ChatServer) logToFile(message string) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logMessage := fmt.Sprintf("[%s] %s\n", timestamp, message)
+
+	// Log to console and append to log file
+	fmt.Print(logMessage)
+	file, err := os.OpenFile(s.logFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("❌ Ошибка записи в лог-файл: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	file.WriteString(logMessage)
 }
 
 // Функции для работы с WebSocket сообщениями
@@ -112,9 +138,9 @@ func (s *ChatServer) Start() error {
 	http.HandleFunc("/ws", s.handleWebSocket)
 	http.HandleFunc("/", s.handleHome)
 
-	fmt.Printf("🚀 WebSocket чат-сервер запущен на %s\n", address)
-	fmt.Println("WebSocket endpoint: ws://" + address + "/ws")
-	fmt.Println("Ожидание подключений...")
+	startMessage := fmt.Sprintf("🚀 WebSocket чат-сервер запущен на %s\nWebSocket endpoint: ws://%s/ws\nОжидание подключений...", address, address)
+	fmt.Println(startMessage)
+	s.logToFile(fmt.Sprintf("Сервер запущен на %s", address))
 
 	// Обработка сигналов для graceful shutdown
 	go s.handleSignals()
@@ -148,7 +174,9 @@ func (s *ChatServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientAddr := r.RemoteAddr
-	fmt.Printf("📱 Новое WebSocket подключение: %s\n", clientAddr)
+	connectionMessage := fmt.Sprintf("📱 Новое WebSocket подключение: %s", clientAddr)
+	fmt.Println(connectionMessage)
+	s.logToFile(connectionMessage)
 
 	// Создаем клиента
 	client := &Client{
@@ -429,7 +457,9 @@ func (s *ChatServer) findClientByNickname(nickname string) *Client {
 func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
-		// Обычное сообщение в чат
+		chatMessage := fmt.Sprintf("💬 %s: %s", client.nickname, msg.Content)
+		fmt.Println(chatMessage)
+		s.logToFile(chatMessage)
 		s.broadcastJSONMessage(Message{
 			Type:      "chat",
 			Content:   msg.Content,
@@ -477,7 +507,9 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				Timestamp: timestamp,
 				Flags:     map[string]bool{"private": true},
 			})
-			fmt.Printf("💌 ЛС от %s к %s: %s\n", client.nickname, msg.To, msg.Content)
+			privateMessage := fmt.Sprintf("💌 ЛС от %s к %s: %s", client.nickname, msg.To, msg.Content)
+			fmt.Println(privateMessage)
+			s.logToFile(privateMessage)
 		} else {
 			// Пользователь оффлайн - сохраняем как отложенное сообщение
 			if msg.To == client.nickname {
@@ -671,12 +703,31 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			})
 		}
 
+	case "log":
+		s.sendLogFile(client)
+
 	default:
 		s.sendJSONMessage(client, Message{
 			Type:  "error",
 			Error: "Неизвестная команда",
 		})
 	}
+}
+
+func (s *ChatServer) sendLogFile(client *Client) {
+	content, err := ioutil.ReadFile(s.logFile)
+	if err != nil {
+		s.sendJSONMessage(client, Message{
+			Type:  "error",
+			Error: "Не удалось прочитать лог-файл",
+		})
+		return
+	}
+
+	s.sendJSONMessage(client, Message{
+		Type:    "log",
+		Content: string(content),
+	})
 }
 
 func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
@@ -737,6 +788,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#fav clear":     "очистить список",
 		"#block ник":     "добавить в чёрный список",
 		"#unblock ник":   "убрать из чёрного списка",
+		"#log":           "получить содержимое лог-файла",
 		"/quit":          "выход из чата",
 	}
 
@@ -790,12 +842,13 @@ func (s *ChatServer) disconnectClient(client *Client) {
 
 	if client.nickname != "" {
 		leaveMessage := fmt.Sprintf("🔴 %s покинул чат", client.nickname)
+		fmt.Println(leaveMessage)
+		s.logToFile(leaveMessage)
 		s.broadcastJSONMessage(Message{
 			Type:      "system",
 			Content:   leaveMessage,
 			Timestamp: time.Now().Format("15:04:05"),
 		}, nil)
-		fmt.Printf("👋 %s отключился\n", client.nickname)
 	}
 }
 
@@ -827,6 +880,14 @@ func (s *ChatServer) Shutdown() {
 	}
 	s.clients = make(map[*Client]bool)
 	s.mutex.Unlock()
+
+	// Удаляем лог-файл
+	err := os.Remove(s.logFile)
+	if err != nil {
+		fmt.Printf("❌ Ошибка удаления лог-файла: %v\n", err)
+	} else {
+		fmt.Println("🗑️ Лог-файл удалён")
+	}
 
 	fmt.Println("✅ Сервер остановлен")
 }

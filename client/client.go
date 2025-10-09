@@ -172,6 +172,7 @@ func (c *ChatClient) Start() {
 	fmt.Println("  #mailbox - проверить почтовый ящик")
 	fmt.Println("  #block ник - добавить в чёрный список")
 	fmt.Println("  #unblock ник - убрать из чёрного списка")
+	fmt.Println("  #log - показать содержимое лог-файла сервера")
 	fmt.Println("  /quit - выход из чата")
 	fmt.Println(strings.Repeat("=", 50))
 
@@ -262,6 +263,8 @@ func (c *ChatClient) handleCommand(message string) {
 				msg.Data["target"] = subParts[1]
 			}
 		}
+	case "log":
+		// Directly send the log command without redundant calls
 	default:
 		fmt.Printf("❌ Неизвестная команда: %s\n", cmd)
 		return
@@ -292,6 +295,17 @@ func (c *ChatClient) handlePrivateMessage(message string) {
 	err := c.sendJSONMessage(msg)
 	if err != nil {
 		fmt.Printf("❌ Ошибка отправки личного сообщения: %v\n", err)
+	}
+}
+
+func (c *ChatClient) requestLog() {
+	msg := Message{
+		Type: "command",
+		Data: map[string]string{"command": "log"},
+	}
+	err := c.conn.WriteJSON(msg)
+	if err != nil {
+		fmt.Printf("❌ Ошибка запроса лог-файла: %v\n", err)
 	}
 }
 
@@ -367,6 +381,11 @@ func (c *ChatClient) handleServerMessage(msg *Message) {
 	case "unblocked":
 		// Пользователь разблокирован
 		c.printUnblocked(msg)
+	case "log":
+		fmt.Println("\n📜 Содержимое лог-файла сервера:")
+		fmt.Println(strings.Repeat("─", 60))
+		fmt.Println(msg.Content)
+		fmt.Println(strings.Repeat("─", 60))
 	case "error":
 		// Ошибка
 		c.printError(msg)
@@ -482,6 +501,7 @@ func (c *ChatClient) handleHelp(msg *Message) {
 	for cmd, desc := range msg.Data {
 		fmt.Printf("\033[1;32m%-25s\033[0m %s\n", cmd, desc)
 	}
+	fmt.Printf("\033[1;32m%-25s\033[0m %s\n", "#log", "показать содержимое лог-файла сервера")
 
 	fmt.Println(strings.Repeat("─", 60))
 	fmt.Print("> ")
