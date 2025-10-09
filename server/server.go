@@ -16,8 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/gorilla/websocket"
+	"unicode"
 )
 
 // JSON структуры для сообщений
@@ -43,6 +42,7 @@ type Client struct {
 	showWordLengths bool
 	showUppercase   bool
 	color           string // Hex color for user messages
+	zaborMode       bool   // НОВОЕ: режим "забора" для исходящих сообщений
 }
 
 type MailboxMessage struct {
@@ -111,6 +111,27 @@ func generateRandomColor() string {
 func isValidHexColor(color string) bool {
 	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
 	return matched
+}
+
+// toZabor converts text to "забор" style: чередование заглавных и строчных букв
+func toZabor(text string) string {
+	var result strings.Builder
+	upper := true
+
+	for _, r := range text {
+		if unicode.IsLetter(r) {
+			if upper {
+				result.WriteRune(unicode.ToUpper(r))
+			} else {
+				result.WriteRune(unicode.ToLower(r))
+			}
+			upper = !upper
+		} else {
+			result.WriteRune(r)
+		}
+	}
+
+	return result.String()
 }
 
 func (s *ChatServer) logToFile(message string) {
@@ -240,6 +261,8 @@ func (s *ChatServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		blocked:         make(map[string]bool),
 		favoriteUsers:   make(map[string]bool),
 		showWordLengths: false,
+		color:           "",
+		zaborMode:       false, // Инициализация нового поля
 	}
 
 	// Добавляем клиента в список
@@ -642,7 +665,11 @@ func (s *ChatServer) getLastWriter() (string, time.Time) {
 func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
-		chatMessage := fmt.Sprintf("💬 %s: %s", client.nickname, msg.Content)
+		content := msg.Content
+		if client.zaborMode {
+			content = toZabor(content)
+		}
+		chatMessage := fmt.Sprintf("💬 %s: %s", client.nickname, content)
 		fmt.Println(chatMessage)
 		s.logToFile(chatMessage)
 		// Обычное сообщение в чат
@@ -735,11 +762,15 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 					continue
 				}
 			timestamp := time.Now().Format("15:04:05")
-			// Отправляем получателю (учитываем капс у отправителя)
 			pcontent := msg.Content
-			if client.showUppercase {
-				pcontent = strings.ToUpper(pcontent)
+			if client.zaborMode {
+				pcontent = toZabor(privateContent)
 			}
+      if client.showUppercase {
+				pcontent = strings.ToUpper(pcontent)
+      }
+
+			// Отправляем получателю
 			privateMsg := Message{
 				Type:      "private",
 				Content:   pcontent,
@@ -776,13 +807,13 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 			// Отправляем подтверждение отправителю
 			s.sendJSONMessage(client, Message{
 				Type:      "private_sent",
-				Content:   msg.Content,
+				Content:   privateContent,
 				From:      client.nickname,
 				To:        msg.To,
 				Timestamp: timestamp,
 				Flags:     map[string]bool{"private": true},
 			})
-			privateMessage := fmt.Sprintf("💌 ЛС от %s к %s: %s", client.nickname, msg.To, msg.Content)
+			privateMessage := fmt.Sprintf("💌 ЛС от %s к %s: %s", client.nickname, msg.To, privateContent)
 			fmt.Println(privateMessage)
 			s.logToFile(privateMessage)
 		} else {
@@ -858,29 +889,34 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 		s.updateLastWriter(client.nickname)
 
 		timestamp := time.Now().Format("15:04:05")
-		// Учитываем режим капса у отправителя
-		bcontent := content
-		if client.showUppercase {
-			bcontent = strings.ToUpper(bcontent)
+		massContent := content
+		if client.zaborMode {
+			massContent = toZabor(massContent)
+    if client.showUppercase {
+			massContent = strings.ToUpper(massContent)
 		}
 		// Сохраняем последнее массовое сообщение отправителя
 		s.setLastMessage(client.nickname, Message{
 			Type:      "mass_private",
-			Content:   bcontent,
+			Content:   massContent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
 		})
 		s.broadcastJSONMessage(Message{
 			Type:      "mass_private",
-			Content:   bcontent,
+			Content:   massContent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
 		}, client)
+		sentContent := content
+		if client.zaborMode {
+			sentContent = toZabor(sentContent)
+		}
 		s.sendJSONMessage(client, Message{
 			Type:      "mass_private_sent",
-			Content:   bcontent,
+			Content:   sentContent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
@@ -1110,6 +1146,17 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			})
 		}
 
+	case "userzabor":
+		client.zaborMode = !client.zaborMode
+		status := "выключен"
+		if client.zaborMode {
+			status = "включен"
+		}
+		s.sendJSONMessage(client, Message{
+			Type:    "system",
+			Content: fmt.Sprintf("Режим «забор» для ваших сообщений %s", status),
+		})
+
 	default:
 		s.sendJSONMessage(client, Message{
 			Type:  "error",
@@ -1264,6 +1311,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#color #hex":    "установить цвет текста сообщений (например, #FF0000)",
 		"#log":           "получить содержимое лог-файла",
 		"#wordlengths":   "переключить режим показа длин слов",
+		"#UserZabor":     "включить/выключить режим «забор» для ваших сообщений",
     "#kick ник [причина]": "кикнуть пользователя с указанием причины",
 		"#upper":         "отображать ваши сообщения в верхнем регистре",
 		"/quit":          "выход из чата",
@@ -1274,6 +1322,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		Data: helpData,
 	})
 }
+
 func (s *ChatServer) isNicknameTaken(nickname string) bool {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
