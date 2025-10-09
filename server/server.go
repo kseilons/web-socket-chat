@@ -39,6 +39,7 @@ type Client struct {
 	blocked         map[string]bool
 	favoriteUsers   map[string]bool
 	showWordLengths bool
+	showUppercase   bool
 }
 
 type MailboxMessage struct {
@@ -473,17 +474,22 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
 		// Обычное сообщение в чат
+		// Учитываем режим капса у отправителя
+		content := msg.Content
+		if client.showUppercase {
+			content = strings.ToUpper(content)
+		}
 		// Сохраняем как последнее сообщение отправителя
 		s.setLastMessage(client.nickname, Message{
 			Type:      "chat",
-			Content:   msg.Content,
+			Content:   content,
 			From:      client.nickname,
 			Timestamp: time.Now().Format("15:04:05"),
 			Flags:     msg.Flags,
 		})
 		s.broadcastJSONMessage(Message{
 			Type:      "chat",
-			Content:   msg.Content,
+			Content:   content,
 			From:      client.nickname,
 			Timestamp: time.Now().Format("15:04:05"),
 			Flags:     msg.Flags,
@@ -532,10 +538,14 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 			}
 
 			timestamp := time.Now().Format("15:04:05")
-			// Отправляем получателю
+			// Отправляем получателю (учитываем капс у отправителя)
+			pcontent := msg.Content
+			if client.showUppercase {
+				pcontent = strings.ToUpper(pcontent)
+			}
 			privateMsg := Message{
 				Type:      "private",
-				Content:   msg.Content,
+				Content:   pcontent,
 				From:      client.nickname,
 				To:        msg.To,
 				Timestamp: timestamp,
@@ -559,7 +569,7 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 			})
 			fmt.Printf("💌 ЛС от %s к %s: %s\n", client.nickname, msg.To, msg.Content)
 		} else {
-			// Пользователь оффлайн - сохраняем как отложенное сообщение
+			// Пользователь оффлайн - сохраняем как отложенное сообщение (учитывая капс)
 			if msg.To == client.nickname {
 				s.sendJSONMessage(client, Message{
 					Type:  "error",
@@ -568,7 +578,11 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				return
 			}
 
-			success := s.addOfflineMessage(msg.To, client.nickname, msg.Content)
+			offContent := msg.Content
+			if client.showUppercase {
+				offContent = strings.ToUpper(offContent)
+			}
+			success := s.addOfflineMessage(msg.To, client.nickname, offContent)
 			if success {
 				timestamp := time.Now().Format("15:04:05")
 				s.sendJSONMessage(client, Message{
@@ -616,24 +630,29 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			return
 		}
 		timestamp := time.Now().Format("15:04:05")
+		// Учитываем режим капса у отправителя
+		bcontent := content
+		if client.showUppercase {
+			bcontent = strings.ToUpper(bcontent)
+		}
 		// Сохраняем последнее массовое сообщение отправителя
 		s.setLastMessage(client.nickname, Message{
 			Type:      "mass_private",
-			Content:   content,
+			Content:   bcontent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
 		})
 		s.broadcastJSONMessage(Message{
 			Type:      "mass_private",
-			Content:   content,
+			Content:   bcontent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
 		}, client)
 		s.sendJSONMessage(client, Message{
 			Type:      "mass_private_sent",
-			Content:   content,
+			Content:   bcontent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
@@ -752,6 +771,7 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 					})
 				}
 			}
+		}
 	case "last":
 		// Ожидается msg.Data["target"] = ник
 		target := msg.Data["target"]
@@ -786,6 +806,17 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			Type:    "wordlengths_toggle",
 			Content: fmt.Sprintf("Режим показа длин слов %s", status),
 		})
+
+		case "upper":
+			client.showUppercase = !client.showUppercase
+			status := "выключен"
+			if client.showUppercase {
+				status = "включен"
+			}
+			s.sendJSONMessage(client, Message{
+				Type:    "upper_toggle",
+				Content: fmt.Sprintf("Режим капса %s", status),
+			})
 
 	default:
 		s.sendJSONMessage(client, Message{
@@ -859,6 +890,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#block ник":     "добавить в чёрный список",
 		"#unblock ник":   "убрать из чёрного списка",
 		"#wordlengths":   "переключить режим показа длин слов",
+		"#upper":         "отображать ваши сообщения в верхнем регистре",
 		"/quit":          "выход из чата",
 	}
 
