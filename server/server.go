@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -40,6 +41,8 @@ type Client struct {
 	blocked         map[string]bool
 	favoriteUsers   map[string]bool
 	showWordLengths bool
+	showUppercase   bool
+	color           string // Hex color for user messages
 }
 
 type MailboxMessage struct {
@@ -68,6 +71,9 @@ type ChatServer struct {
 	// lastMessages хранит последнее отправленное сообщение для каждого ника
 	lastMessages      map[string]Message
 	lastMessagesMutex sync.RWMutex
+	lastWriter      string
+	lastWriteTime   time.Time
+	lastWriterMutex sync.RWMutex
 }
 
 func NewChatServer(host string, port int) *ChatServer {
@@ -95,6 +101,18 @@ func NewChatServer(host string, port int) *ChatServer {
 	}
 }
 
+// generateRandomColor generates a random hex color
+func generateRandomColor() string {
+	rand.Seed(time.Now().UnixNano())
+	return fmt.Sprintf("#%06X", rand.Intn(0xFFFFFF))
+}
+
+// isValidHexColor validates if a string is a valid 6-character hex color
+func isValidHexColor(color string) bool {
+	matched, _ := regexp.MatchString(`^#[0-9A-Fa-f]{6}$`, color)
+	return matched
+}
+
 func (s *ChatServer) logToFile(message string) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logMessage := fmt.Sprintf("[%s] %s\n", timestamp, message)
@@ -110,6 +128,7 @@ func (s *ChatServer) logToFile(message string) {
 
 	file.WriteString(logMessage)
 }
+
 // setLastMessage сохраняет последнее сообщение для данного ника
 func (s *ChatServer) setLastMessage(nickname string, msg Message) {
 	if nickname == "" {
@@ -496,6 +515,24 @@ func (s *ChatServer) findClientByNickname(nickname string) *Client {
 	return nil
 }
 
+// updateLastWriter обновляет информацию о последнем писавшем пользователе
+func (s *ChatServer) updateLastWriter(nickname string) {
+	s.lastWriterMutex.Lock()
+	defer s.lastWriterMutex.Unlock()
+
+	s.lastWriter = nickname
+	s.lastWriteTime = time.Now()
+}
+
+// getLastWriter получает информацию о последнем писавшем пользователе
+func (s *ChatServer) getLastWriter() (string, time.Time) {
+	s.lastWriterMutex.RLock()
+	defer s.lastWriterMutex.RUnlock()
+
+	return s.lastWriter, s.lastWriteTime
+}
+
+// handleClientMessage обрабатывает сообщения от клиента
 func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 	switch msg.Type {
 	case "message":
@@ -503,17 +540,25 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 		fmt.Println(chatMessage)
 		s.logToFile(chatMessage)
 		// Обычное сообщение в чат
+		// Учитываем режим капса у отправителя
+		content := msg.Content
+		if client.showUppercase {
+			content = strings.ToUpper(content)
+		}
 		// Сохраняем как последнее сообщение отправителя
 		s.setLastMessage(client.nickname, Message{
 			Type:      "chat",
-			Content:   msg.Content,
+			Content:   content,
 			From:      client.nickname,
 			Timestamp: time.Now().Format("15:04:05"),
 			Flags:     msg.Flags,
 		})
+		// Обновляем информацию о последнем писавшем
+		s.updateLastWriter(client.nickname)
+
 		s.broadcastJSONMessage(Message{
 			Type:      "chat",
-			Content:   msg.Content,
+			Content:   content,
 			From:      client.nickname,
 			Timestamp: time.Now().Format("15:04:05"),
 			Flags:     msg.Flags,
@@ -521,6 +566,9 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 
 	case "private":
 		// Личное сообщение
+		// Обновляем информацию о последнем писавшем
+		s.updateLastWriter(client.nickname)
+
 		// Специальная обработка команд, адресованных встроенному нику 'server'
 		lowerTo := strings.ToLower(msg.To)
 		if lowerTo == "server" || lowerTo == "agent" {
@@ -562,10 +610,14 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 			}
 
 			timestamp := time.Now().Format("15:04:05")
-			// Отправляем получателю
+			// Отправляем получателю (учитываем капс у отправителя)
+			pcontent := msg.Content
+			if client.showUppercase {
+				pcontent = strings.ToUpper(pcontent)
+			}
 			privateMsg := Message{
 				Type:      "private",
-				Content:   msg.Content,
+				Content:   pcontent,
 				From:      client.nickname,
 				To:        msg.To,
 				Timestamp: timestamp,
@@ -575,6 +627,11 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 			// Добавляем флаг "favorite" если отправитель в списке любимых получателя
 			if targetClient.favoriteUsers[client.nickname] {
 				privateMsg.Flags["favorite"] = true
+			}
+
+			// Добавляем цвет отправителя
+			if client.color != "" {
+				privateMsg.Data = map[string]string{"color": client.color}
 			}
 
 			s.sendJSONMessage(targetClient, privateMsg)
@@ -591,7 +648,7 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 			fmt.Println(privateMessage)
 			s.logToFile(privateMessage)
 		} else {
-			// Пользователь оффлайн - сохраняем как отложенное сообщение
+			// Пользователь оффлайн - сохраняем как отложенное сообщение (учитывая капс)
 			if msg.To == client.nickname {
 				s.sendJSONMessage(client, Message{
 					Type:  "error",
@@ -600,7 +657,11 @@ func (s *ChatServer) handleClientMessage(client *Client, msg *Message) {
 				return
 			}
 
-			success := s.addOfflineMessage(msg.To, client.nickname, msg.Content)
+			offContent := msg.Content
+			if client.showUppercase {
+				offContent = strings.ToUpper(offContent)
+			}
+			success := s.addOfflineMessage(msg.To, client.nickname, offContent)
 			if success {
 				timestamp := time.Now().Format("15:04:05")
 				s.sendJSONMessage(client, Message{
@@ -638,6 +699,9 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 		s.sendUserListJSON(client)
 	case "mailbox":
 		s.getMailboxStatusJSON(client)
+	case "lastwriter":
+		// Команда для вывода последнего писавшего пользователя
+		s.sendLastWriterJSON(client)
 	case "all":
 		content := msg.Data["content"]
 		if content == "" {
@@ -647,25 +711,33 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			})
 			return
 		}
+		// Обновляем информацию о последнем писавшем
+		s.updateLastWriter(client.nickname)
+
 		timestamp := time.Now().Format("15:04:05")
+		// Учитываем режим капса у отправителя
+		bcontent := content
+		if client.showUppercase {
+			bcontent = strings.ToUpper(bcontent)
+		}
 		// Сохраняем последнее массовое сообщение отправителя
 		s.setLastMessage(client.nickname, Message{
 			Type:      "mass_private",
-			Content:   content,
+			Content:   bcontent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
 		})
 		s.broadcastJSONMessage(Message{
 			Type:      "mass_private",
-			Content:   content,
+			Content:   bcontent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
 		}, client)
 		s.sendJSONMessage(client, Message{
 			Type:      "mass_private_sent",
-			Content:   content,
+			Content:   bcontent,
 			From:      client.nickname,
 			Timestamp: timestamp,
 			Flags:     map[string]bool{"mass_private": true},
@@ -825,6 +897,16 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			Content: fmt.Sprintf("Режим показа длин слов %s", status),
 		})
 
+		case "upper":
+			client.showUppercase = !client.showUppercase
+			status := "выключен"
+			if client.showUppercase {
+				status = "включен"
+			}
+			s.sendJSONMessage(client, Message{
+				Type:    "upper_toggle",
+				Content: fmt.Sprintf("Режим капса %s", status),
+			})
 	case "log":
 		s.sendLogFile(client)
 
@@ -858,6 +940,32 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 			Type:    "info",
 			Content: fmt.Sprintf("Пользователь %s кикнут", targetNick),
 		})
+	case "color":
+		target := msg.Data["target"]
+		if target == "" {
+			// Random color
+			client.color = generateRandomColor()
+			s.sendJSONMessage(client, Message{
+				Type:    "color_set",
+				Content: fmt.Sprintf("Цвет текста сообщений установлен: %s", client.color),
+				Data:    map[string]string{"color": client.color},
+			})
+		} else {
+			// Validate hex color
+			if !isValidHexColor(target) {
+				s.sendJSONMessage(client, Message{
+					Type:  "error",
+					Error: "Неверный формат цвета. Используйте #RRGGBB (например, #FF0000)",
+				})
+				return
+			}
+			client.color = strings.ToUpper(target)
+			s.sendJSONMessage(client, Message{
+				Type:    "color_set",
+				Content: fmt.Sprintf("Цвет текста сообщений установлен: %s", client.color),
+				Data:    map[string]string{"color": client.color},
+			})
+		}
 
 	default:
 		s.sendJSONMessage(client, Message{
@@ -900,6 +1008,27 @@ func (s *ChatServer) kickClient(target *Client, by string, reason string) {
     s.disconnectClient(target)
 }
 
+// sendLastWriterJSON отправляет информацию о последнем писавшем пользователе
+func (s *ChatServer) sendLastWriterJSON(client *Client) {
+	lastWriter, lastWriteTime := s.getLastWriter()
+
+	if lastWriter == "" {
+		s.sendJSONMessage(client, Message{
+			Type:    "last_writer",
+			Content: "Пока никто не писал в чат",
+		})
+	} else {
+		timeStr := lastWriteTime.Format("15:04:05")
+		s.sendJSONMessage(client, Message{
+			Type:      "last_writer",
+			Content:   fmt.Sprintf("Последний писавший: %s в %s", lastWriter, timeStr),
+			From:      lastWriter,
+			Timestamp: timeStr,
+		})
+	}
+}
+
+// broadcastJSONMessage рассылает сообщение всем клиентам
 func (s *ChatServer) sendLogFile(client *Client) {
 	content, err := ioutil.ReadFile(s.logFile)
 	if err != nil {
@@ -952,6 +1081,14 @@ func (s *ChatServer) broadcastJSONMessage(msg Message, exclude *Client) {
 			clientMsg.Flags["favorite"] = true
 		}
 
+		// Добавляем цвет отправителя в Data
+		if sender := s.findClientByNickname(msg.From); sender != nil && sender.color != "" {
+			if clientMsg.Data == nil {
+				clientMsg.Data = make(map[string]string)
+			}
+			clientMsg.Data["color"] = sender.color
+		}
+
 		err := s.sendJSONMessage(client, clientMsg)
 		if err != nil {
 			fmt.Printf("❌ Ошибка отправки сообщения %s: %v\n", client.nickname, err)
@@ -974,14 +1111,18 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#users":         "список пользователей",
 		"#help":          "эта справка",
 		"#mailbox":       "проверить почтовый ящик",
+		"#lastwriter":    "показать последнего писавшего пользователя",
 		"#fav [ник]":     "добавить/удалить любимого писателя",
 		"#fav list":      "показать список",
 		"#fav clear":     "очистить список",
 		"#block ник":     "добавить в чёрный список",
 		"#unblock ник":   "убрать из чёрного списка",
+		"#color":         "установить случайный цвет текста сообщений",
+		"#color #hex":    "установить цвет текста сообщений (например, #FF0000)",
 		"#log":           "получить содержимое лог-файла",
 		"#wordlengths":   "переключить режим показа длин слов",
-        "#kick ник [причина]": "кикнуть пользователя с указанием причины",
+    "#kick ник [причина]": "кикнуть пользователя с указанием причины",
+		"#upper":         "отображать ваши сообщения в верхнем регистре",
 		"/quit":          "выход из чата",
 	}
 
