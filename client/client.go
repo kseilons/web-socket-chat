@@ -180,7 +180,6 @@ func (c *ChatClient) Start() {
 	fmt.Println("  #color #hex - установить цвет текста сообщений (например, #FF0000)")
 	fmt.Println("  #log - показать содержимое лог-файла сервера")
 	fmt.Println("  #wordlengths - переключить режим показа длин слов")
-	fmt.Println("  #UserZabor - включить/выключить режим «забор» для ваших сообщений")
 	fmt.Println("  /quit - выход из чата")
 	fmt.Println(strings.Repeat("=", 50))
 
@@ -238,7 +237,7 @@ func (c *ChatClient) handleCommand(message string) {
 	msg.Data["command"] = cmd
 
 	switch cmd {
-	case "help", "users", "mailbox", "wordlengths", "upper", "userzabor":
+	case "help", "users", "mailbox", "wordlengths", "upper":
 		// Простые команды без параметров
 	case "last":
 		if len(parts) < 2 {
@@ -607,6 +606,7 @@ func (c *ChatClient) handleHelp(msg *Message) {
 	for cmd, desc := range msg.Data {
 		fmt.Printf("\033[1;32m%-25s\033[0m %s\n", cmd, desc)
 	}
+	fmt.Printf("\033[1;32m%-25s\033[0m %s\n", "#log", "показать содержимое лог-файла сервера")
 
 	fmt.Println(strings.Repeat("─", 60))
 	fmt.Print("> ")
