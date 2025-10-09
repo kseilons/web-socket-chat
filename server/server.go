@@ -109,6 +109,7 @@ func (s *ChatServer) logToFile(message string) {
 	defer file.Close()
 
 	file.WriteString(logMessage)
+}
 // setLastMessage сохраняет последнее сообщение для данного ника
 func (s *ChatServer) setLastMessage(nickname string, msg Message) {
 	if nickname == "" {
@@ -827,12 +828,76 @@ func (s *ChatServer) handleCommand(client *Client, msg *Message) {
 	case "log":
 		s.sendLogFile(client)
 
+	case "kick":
+		targetNick := strings.TrimSpace(msg.Data["target"])
+		reason := strings.TrimSpace(msg.Data["reason"]) // optional
+		if targetNick == "" {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Использование: #kick <ник> [причина]",
+			})
+			return
+		}
+		if targetNick == client.nickname {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: "Нельзя кикнуть себя",
+			})
+			return
+		}
+		target := s.findClientByNickname(targetNick)
+		if target == nil {
+			s.sendJSONMessage(client, Message{
+				Type:  "error",
+				Error: fmt.Sprintf("Пользователь %s не найден", targetNick),
+			})
+			return
+		}
+		s.kickClient(target, client.nickname, reason)
+		s.sendJSONMessage(client, Message{
+			Type:    "info",
+			Content: fmt.Sprintf("Пользователь %s кикнут", targetNick),
+		})
+
 	default:
 		s.sendJSONMessage(client, Message{
 			Type:  "error",
 			Error: "Неизвестная команда",
 		})
 	}
+}
+
+// kickClient принудительно отключает пользователя с уведомлением и логированием
+func (s *ChatServer) kickClient(target *Client, by string, reason string) {
+    if target == nil {
+        return
+    }
+    if reason == "" {
+        reason = "без причины"
+    }
+
+    timestamp := time.Now().Format("15:04:05")
+
+    // Уведомляем целевого пользователя
+    s.sendJSONMessage(target, Message{
+        Type:      "system",
+        Content:   fmt.Sprintf("Вас кикнул %s: %s", by, reason),
+        Timestamp: timestamp,
+        Flags:     map[string]bool{"kicked": true},
+    })
+
+    // Логируем и уведомляем остальных
+    info := fmt.Sprintf("⛔ %s кикнул %s: %s", by, target.nickname, reason)
+    fmt.Println(info)
+    s.logToFile(info)
+    s.broadcastJSONMessage(Message{
+        Type:      "system",
+        Content:   fmt.Sprintf("⛔ %s был кикнут (%s)", target.nickname, reason),
+        Timestamp: timestamp,
+    }, target)
+
+    // Отключаем пользователя
+    s.disconnectClient(target)
 }
 
 func (s *ChatServer) sendLogFile(client *Client) {
@@ -916,6 +981,7 @@ func (s *ChatServer) sendHelpJSON(client *Client) {
 		"#unblock ник":   "убрать из чёрного списка",
 		"#log":           "получить содержимое лог-файла",
 		"#wordlengths":   "переключить режим показа длин слов",
+        "#kick ник [причина]": "кикнуть пользователя с указанием причины",
 		"/quit":          "выход из чата",
 	}
 
